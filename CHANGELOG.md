@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0] - 2026-06-25
+
+### Added
+- `[CommandHandler]` — semantic alias for `[Handler]`, use on command handlers to express intent
+- `[QueryHandler]` — semantic alias for `[Handler]`, use on query handlers to express intent
+- Both aliases support the `Lifetime` property (`Scoped`/`Singleton`/`Transient`)
+- All three attributes (`[Handler]`, `[CommandHandler]`, `[QueryHandler]`) are interchangeable
+
 ## [1.1.0] - 2026-06-25
 
 ### Added

@@ -35,6 +35,28 @@ namespace AutoDispatch
         /// <summary>The DI lifetime for this handler. Defaults to Scoped.</summary>
         public HandlerLifetime Lifetime { get; set; } = HandlerLifetime.Scoped;
     }
+
+    /// <summary>
+    /// Semantic alias for <see cref=""HandlerAttribute""/> — use on command handlers to make
+    /// intent explicit. Behaves identically to <c>[Handler]</c>.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class CommandHandlerAttribute : Attribute
+    {
+        /// <summary>The DI lifetime for this handler. Defaults to Scoped.</summary>
+        public HandlerLifetime Lifetime { get; set; } = HandlerLifetime.Scoped;
+    }
+
+    /// <summary>
+    /// Semantic alias for <see cref=""HandlerAttribute""/> — use on query handlers to make
+    /// intent explicit. Behaves identically to <c>[Handler]</c>.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class QueryHandlerAttribute : Attribute
+    {
+        /// <summary>The DI lifetime for this handler. Defaults to Scoped.</summary>
+        public HandlerLifetime Lifetime { get; set; } = HandlerLifetime.Scoped;
+    }
 }
 ";
 
@@ -71,16 +93,28 @@ namespace AutoDispatch
         context.RegisterPostInitializationOutput(static ctx =>
             ctx.AddSource("AutoDispatch.Attributes.g.cs", AttributeSource));
 
-        var handlers = context.SyntaxProvider
+        var handlers = MakeHandlerProvider(context, "AutoDispatch.HandlerAttribute")
+            .Collect()
+            .Combine(MakeHandlerProvider(context, "AutoDispatch.CommandHandlerAttribute").Collect())
+            .Combine(MakeHandlerProvider(context, "AutoDispatch.QueryHandlerAttribute").Collect());
+
+        context.RegisterSourceOutput(handlers, static (ctx, tuple) =>
+        {
+            var ((h1, h2), h3) = tuple;
+            Generate(ctx, h1.AddRange(h2).AddRange(h3));
+        });
+    }
+
+    private static IncrementalValuesProvider<HandlerInfo> MakeHandlerProvider(
+        IncrementalGeneratorInitializationContext context,
+        string attributeFqn) =>
+        context.SyntaxProvider
             .ForAttributeWithMetadataName(
-                "AutoDispatch.HandlerAttribute",
+                attributeFqn,
                 predicate: static (node, _) => node is ClassDeclarationSyntax,
                 transform: static (ctx, ct) => TransformHandler(ctx, ct))
             .Where(static info => info is not null)
             .Select(static (info, _) => info!);
-
-        context.RegisterSourceOutput(handlers.Collect(), static (ctx, handlers) => Generate(ctx, handlers));
-    }
 
     private static HandlerInfo? TransformHandler(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
     {

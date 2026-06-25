@@ -427,4 +427,67 @@ public sealed class PingHandler
         Assert.Contains("Singleton", src);
         Assert.Contains("Transient", src);
     }
+
+    [Fact]
+    public void CommandHandlerAlias_GeneratesDispatcher()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed class CreateOrderCommand { }
+
+[CommandHandler]
+public sealed class CreateOrderHandler
+{
+    public void Handle(CreateOrderCommand cmd) { }
+}", out _);
+
+        Assert.True(sources.ContainsKey("AutoDispatch.Dispatcher.g.cs"));
+        Assert.Contains("CreateOrderCommand", sources["AutoDispatch.Dispatcher.g.cs"]);
+    }
+
+    [Fact]
+    public void QueryHandlerAlias_GeneratesDispatcher()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed class GetOrdersQuery { }
+
+[QueryHandler]
+public sealed class GetOrdersHandler
+{
+    public void Handle(GetOrdersQuery query) { }
+}", out _);
+
+        Assert.True(sources.ContainsKey("AutoDispatch.Dispatcher.g.cs"));
+        Assert.Contains("GetOrdersQuery", sources["AutoDispatch.Dispatcher.g.cs"]);
+    }
+
+    [Fact]
+    public void QueryHandlerAlias_WithLifetime_EmitsCorrectRegistration()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed class GetOrdersQuery { }
+
+[QueryHandler(Lifetime = HandlerLifetime.Singleton)]
+public sealed class GetOrdersHandler
+{
+    public void Handle(GetOrdersQuery query) { }
+}", out _);
+
+        Assert.Contains("services.AddSingleton<global::GetOrdersHandler>();",
+            sources["AutoDispatch.Registration.g.cs"]);
+    }
+
+    [Fact]
+    public void Attributes_ContainsAllThreeAliases()
+    {
+        var src = RunGenerator(string.Empty, out _)["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("CommandHandlerAttribute", src);
+        Assert.Contains("QueryHandlerAttribute", src);
+        Assert.Contains("HandlerAttribute", src);
+    }
 }
