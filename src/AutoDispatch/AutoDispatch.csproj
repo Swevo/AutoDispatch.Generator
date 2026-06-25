@@ -10,7 +10,7 @@
     <NoWarn>$(NoWarn);NU5017;NU5128;RS2008</NoWarn>
 
     <PackageId>AutoDispatch.Generator</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Justin Bannister</Authors>
     <Copyright>Copyright (c) 2026 Justin Bannister</Copyright>
     <Description>Compile-time CQRS dispatcher for .NET using Roslyn source generators. Add [Handler] to your handler class — AutoDispatch generates a strongly-typed IDispatcher interface and Dispatcher implementation at build time. No IRequest&lt;T&gt; marker interfaces, no reflection, zero runtime overhead. Works with ASP.NET Core, Worker Services, and any Microsoft.Extensions.DependencyInjection project.</Description>

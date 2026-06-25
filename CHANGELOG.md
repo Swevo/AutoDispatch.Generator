@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0] - 2026-06-25
+
+### Added
+- `HandlerLifetime` enum: `Scoped` (default), `Singleton`, `Transient`
+- `[Handler(Lifetime = HandlerLifetime.Singleton)]` controls the DI registration lifetime per handler
+- `AddAutoDispatch()` now emits `AddSingleton<T>()` or `AddTransient<T>()` accordingly
+
 ## [1.0.0] - 2026-06-25
 
 ### Added
