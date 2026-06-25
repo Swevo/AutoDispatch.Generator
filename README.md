@@ -218,6 +218,9 @@ Use AutoDispatch when you want:
 
 ## Also by the same author
 
+> 🌐 Full suite overview: **[swevo.github.io](https://swevo.github.io/)**
+
+
 | Package | Description |
 |---|---|
 | [**AutoWire**](https://github.com/Swevo/AutoWire) | Compile-time DI auto-registration for `Microsoft.Extensions.DependencyInjection`. |
