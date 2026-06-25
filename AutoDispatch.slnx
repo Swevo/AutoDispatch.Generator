@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/AutoDispatch/AutoDispatch.csproj" />
+  <Project Path="tests/AutoDispatch.Tests/AutoDispatch.Tests.csproj" />
+</Solution>

@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <NoWarn>$(NoWarn);NU5017;NU5128;RS2008</NoWarn>
+
+    <PackageId>AutoDispatch.Generator</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Justin Bannister</Authors>
+    <Copyright>Copyright (c) 2026 Justin Bannister</Copyright>
+    <Description>Compile-time CQRS dispatcher for .NET using Roslyn source generators. Add [Handler] to your handler class — AutoDispatch generates a strongly-typed IDispatcher interface and Dispatcher implementation at build time. No IRequest&lt;T&gt; marker interfaces, no reflection, zero runtime overhead. Works with ASP.NET Core, Worker Services, and any Microsoft.Extensions.DependencyInjection project.</Description>
+    <PackageTags>cqrs;mediator;dispatcher;source-generator;roslyn;dotnet;aspnetcore;csharp;compile-time;zero-reflection;aot;mediatR-alternative;command-handler;query-handler</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/Swevo/AutoDispatch.Generator</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Swevo/AutoDispatch.Generator</PackageProjectUrl>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageIcon>icon.png</PackageIcon>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>false</IncludeSymbols>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <PackageReleaseNotes>1.0.0: [Handler] attribute, Handle/HandleAsync discovery, typed IDispatcher + Dispatcher generated, AddAutoDispatch() DI registration, AD001/AD002/AD003 diagnostics.</PackageReleaseNotes>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.*" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.*" PrivateAssets="all">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.*" PrivateAssets="all">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="$(OutputPath)$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="build\AutoDispatch.props" Pack="true" PackagePath="build\" />
+    <None Include="build\AutoDispatch.Generator.props" Pack="true" PackagePath="build\" />
+  </ItemGroup>
+</Project>
