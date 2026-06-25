@@ -19,6 +19,10 @@ namespace Microsoft.Extensions.DependencyInjection
     {
         public static IServiceCollection AddScoped<TService>(this IServiceCollection services) => services;
         public static IServiceCollection AddScoped<TService, TImplementation>(this IServiceCollection services) where TImplementation : TService => services;
+        public static IServiceCollection AddSingleton<TService>(this IServiceCollection services) => services;
+        public static IServiceCollection AddSingleton<TService, TImplementation>(this IServiceCollection services) where TImplementation : TService => services;
+        public static IServiceCollection AddTransient<TService>(this IServiceCollection services) => services;
+        public static IServiceCollection AddTransient<TService, TImplementation>(this IServiceCollection services) where TImplementation : TService => services;
     }
 
     public static class ServiceProviderServiceExtensions
@@ -358,5 +362,69 @@ namespace MyApp
         Assert.Contains("global::MyApp.CreateOrderCommand", src);
         Assert.Contains("global::MyApp.CreateOrderHandler", src);
         Assert.Contains("global::System.Threading.Tasks.Task<global::MyApp.OrderId>", src);
+    }
+
+    [Fact]
+    public void HandlerLifetime_Singleton_EmitsAddSingleton()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed class PingCommand { }
+
+[Handler(Lifetime = HandlerLifetime.Singleton)]
+public sealed class PingHandler
+{
+    public void Handle(PingCommand cmd) { }
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddSingleton<global::PingHandler>();", src);
+    }
+
+    [Fact]
+    public void HandlerLifetime_Transient_EmitsAddTransient()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed class PingCommand { }
+
+[Handler(Lifetime = HandlerLifetime.Transient)]
+public sealed class PingHandler
+{
+    public void Handle(PingCommand cmd) { }
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddTransient<global::PingHandler>();", src);
+    }
+
+    [Fact]
+    public void HandlerLifetime_Default_EmitsAddScoped()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed class PingCommand { }
+
+[Handler]
+public sealed class PingHandler
+{
+    public void Handle(PingCommand cmd) { }
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped<global::PingHandler>();", src);
+    }
+
+    [Fact]
+    public void Attributes_ContainsHandlerLifetimeEnum()
+    {
+        var sources = RunGenerator(string.Empty, out _);
+        var src = sources["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("HandlerLifetime", src);
+        Assert.Contains("Singleton", src);
+        Assert.Contains("Transient", src);
     }
 }
