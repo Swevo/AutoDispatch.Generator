@@ -19,6 +19,7 @@ namespace Microsoft.Extensions.DependencyInjection
     {
         public static IServiceCollection AddScoped<TService>(this IServiceCollection services) => services;
         public static IServiceCollection AddScoped<TService, TImplementation>(this IServiceCollection services) where TImplementation : TService => services;
+        public static IServiceCollection AddScoped(this IServiceCollection services, System.Type serviceType) => services;
         public static IServiceCollection AddSingleton<TService>(this IServiceCollection services) => services;
         public static IServiceCollection AddSingleton<TService, TImplementation>(this IServiceCollection services) where TImplementation : TService => services;
         public static IServiceCollection AddTransient<TService>(this IServiceCollection services) => services;
@@ -489,5 +490,192 @@ public sealed class GetOrdersHandler
         Assert.Contains("CommandHandlerAttribute", src);
         Assert.Contains("QueryHandlerAttribute", src);
         Assert.Contains("HandlerAttribute", src);
+    }
+
+    [Fact]
+    public void BehaviorAttribute_GeneratedInAttributesFile()
+    {
+        var src = RunGenerator(string.Empty, out _)["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("BehaviorAttribute", src);
+    }
+
+    [Fact]
+    public void IPipelineBehavior_GeneratedInAttributesFile()
+    {
+        var src = RunGenerator(string.Empty, out _)["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("IPipelineBehavior", src);
+    }
+
+    [Fact]
+    public void Unit_GeneratedInAttributesFile()
+    {
+        var src = RunGenerator(string.Empty, out _)["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("Unit", src);
+    }
+
+    [Fact]
+    public void OpenGenericBehavior_TaskOfT_WrapsDispatchInPipeline()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[Behavior(Order = 0)]
+public sealed class LoggingBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult>
+{
+    public Task<TResult> HandleAsync(TCmd command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("LoggingBehavior<", src);
+        Assert.Contains(".HandleAsync(command,", src);
+    }
+
+    [Fact]
+    public void OpenGenericBehavior_BareTask_WrapsDispatchUsingUnit()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class PingCommand { }
+
+[Handler]
+public sealed class PingHandler
+{
+    public Task HandleAsync(PingCommand cmd, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+[Behavior(Order = 0)]
+public sealed class LoggingBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult>
+{
+    public Task<TResult> HandleAsync(TCmd command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("Unit.Value", src);
+        Assert.Contains("LoggingBehavior<", src);
+    }
+
+    [Fact]
+    public void OpenGenericBehavior_SyncHandler_NotWrapped()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed class DeleteOrderCommand { }
+
+[Handler]
+public sealed class DeleteOrderHandler
+{
+    public void Handle(DeleteOrderCommand cmd) { }
+}
+
+[Behavior(Order = 0)]
+public sealed class LoggingBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult>
+{
+    public System.Threading.Tasks.Task<TResult> HandleAsync(TCmd command, System.Func<System.Threading.Tasks.Task<TResult>> next, System.Threading.CancellationToken ct = default) => next();
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.DoesNotContain("pipeline", src);
+    }
+
+    [Fact]
+    public void OpenGenericBehavior_RegisteredInDI()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[Behavior(Order = 0)]
+public sealed class LoggingBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult>
+{
+    public Task<TResult> HandleAsync(TCmd command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped(typeof(global::LoggingBehavior<,>));", src);
+    }
+
+    [Fact]
+    public void OpenGenericBehavior_MultipleBehaviors_OrderApplied()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[Behavior(Order = 0)]
+public sealed class FirstBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult>
+{
+    public Task<TResult> HandleAsync(TCmd command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}
+
+[Behavior(Order = 1)]
+public sealed class SecondBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult>
+{
+    public Task<TResult> HandleAsync(TCmd command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("FirstBehavior<", src);
+        Assert.Contains("SecondBehavior<", src);
+        // SecondBehavior (Order=1) is inner → written first in source; FirstBehavior (Order=0) is outer → written last
+        var secondIdx = src.IndexOf("SecondBehavior<", System.StringComparison.Ordinal);
+        var firstIdx = src.LastIndexOf("FirstBehavior<", System.StringComparison.Ordinal);
+        Assert.True(secondIdx < firstIdx, "SecondBehavior (inner, Order=1) should appear before FirstBehavior (outer, Order=0) in generated source");
+    }
+
+    [Fact]
+    public void OpenGenericBehavior_NoBehaviors_SimpleDispatchPreserved()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("=>", src);
+        Assert.DoesNotContain("pipeline", src);
     }
 }

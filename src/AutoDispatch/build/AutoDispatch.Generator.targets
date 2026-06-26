@@ -1,0 +1,13 @@
+<Project>
+  <Target Name="InstallAutoDispatchCopilotAgent" AfterTargets="Build">
+    <PropertyGroup>
+      <_CopilotAgentsDir Condition="'$(OS)' == 'Windows_NT'">$(USERPROFILE)\.copilot\agents\</_CopilotAgentsDir>
+      <_CopilotAgentsDir Condition="'$(OS)' != 'Windows_NT'">$(HOME)/.copilot/agents/</_CopilotAgentsDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(_CopilotAgentsDir)" Condition="!Exists('$(_CopilotAgentsDir)')" />
+    <Copy
+      SourceFiles="$(MSBuildThisFileDirectory)..\copilot\agents\security-checker.agent.md"
+      DestinationFolder="$(_CopilotAgentsDir)"
+      SkipUnchangedFiles="true" />
+  </Target>
+</Project>
