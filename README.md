@@ -8,10 +8,11 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 ## Why AutoDispatch?
 
 - **Same mental model as MediatR** — command/query + handler + dispatcher
-- **Zero runtime overhead** — direct generated calls, no reflection, no runtime pipelines
+- **Zero reflection** — direct generated calls, no runtime dispatch overhead
+- **Pipeline behaviors** — `[Behavior(Order = N)]` wraps all async handlers at compile time; no `IPipelineBehavior<,>` magic at runtime
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
-- **DI-ready** — `AddAutoDispatch()` wires up handlers and `IDispatcher`
+- **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
 
 ## Installation
 
@@ -173,6 +174,82 @@ services.AddScoped<DeleteOrderHandler>();
 services.AddScoped<AutoDispatch.IDispatcher, AutoDispatch.Dispatcher>();
 ```
 
+## Pipeline behaviors
+
+`[Behavior(Order = N)]` wraps all async handlers in a compile-time pipeline. Identical mental model to MediatR's `IPipelineBehavior<,>` — but the chain is emitted as generated code, not resolved via reflection at runtime.
+
+### Define a behavior
+
+```csharp
+using AutoDispatch;
+
+[Behavior(Order = 0)]
+public sealed class LoggingBehavior<TCommand, TResult>
+    : IPipelineBehavior<TCommand, TResult>
+{
+    private readonly ILogger<LoggingBehavior<TCommand, TResult>> _logger;
+
+    public LoggingBehavior(ILogger<LoggingBehavior<TCommand, TResult>> logger)
+        => _logger = logger;
+
+    public async Task<TResult> HandleAsync(
+        TCommand command,
+        Func<Task<TResult>> next,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation("→ {Command}", typeof(TCommand).Name);
+        var result = await next();
+        _logger.LogInformation("← {Command}", typeof(TCommand).Name);
+        return result;
+    }
+}
+```
+
+That's all. `AddAutoDispatch()` registers it automatically.
+
+### Multiple behaviors
+
+```csharp
+[Behavior(Order = 0)]  // runs first (outermost)
+public sealed class LoggingBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult> { ... }
+
+[Behavior(Order = 1)]  // runs second
+public sealed class ValidationBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult> { ... }
+
+[Behavior(Order = 2)]  // runs last (innermost, just before the handler)
+public sealed class TimingBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TResult> { ... }
+```
+
+Execution order: Logging → Validation → Timing → Handler → Timing → Validation → Logging.
+
+### What gets generated
+
+For `Task<OrderId> SendAsync(CreateOrderCommand)` with two behaviors:
+
+```csharp
+// Generated dispatcher method:
+public Task<OrderId> SendAsync(CreateOrderCommand command, CancellationToken ct = default)
+{
+    Func<Task<OrderId>> pipeline =
+        () => _sp.GetRequiredService<CreateOrderHandler>().HandleAsync(command, ct);
+    var _b1 = _sp.GetRequiredService<TimingBehavior<CreateOrderCommand, OrderId>>();
+    var _p1 = pipeline;
+    pipeline = () => _b1.HandleAsync(command, _p1, ct);
+    var _b0 = _sp.GetRequiredService<LoggingBehavior<CreateOrderCommand, OrderId>>();
+    var _p0 = pipeline;
+    pipeline = () => _b0.HandleAsync(command, _p0, ct);
+    return pipeline();
+}
+```
+
+### Behaviors and void-async handlers
+
+For `Task` (no result) handlers, the generator wraps the call in `Task<Unit>` internally. `Unit` is emitted by the generator — you never reference it directly; the method signature stays `Task SendAsync(...)`.
+
+### Behaviors only apply to async handlers
+
+Sync `T Send(...)` and `void Send(...)` methods are not wrapped. Add a pipeline when you migrate a sync handler to async, or keep it sync for zero overhead.
+
 ## Diagnostics
 
 | Code | Severity | Description |
@@ -201,11 +278,11 @@ The method still works; the warning helps you preserve cancellation flow.
 
 ## AutoDispatch vs alternatives
 
-| Approach | Boilerplate | Runtime dispatch | Compile-time safety | DI registration | AOT friendliness |
+| Approach | Boilerplate | Runtime dispatch | Pipeline behaviors | Compile-time safety | AOT |
 |---|---|---|---|---|---|
-| **AutoDispatch** | Low | None | High | Generated | High |
-| **MediatR** | Medium | Yes | High | Manual/package-driven | Medium |
-| **Raw service calls** | Low | None | High | Manual | High |
+| **AutoDispatch** | Low | None | Compile-time generated | High | ✅ |
+| **MediatR** | Medium | Yes | Runtime reflection | High | ⚠️ |
+| **Raw service calls** | Low | None | Manual | High | ✅ |
 
 ## Best fit
 
