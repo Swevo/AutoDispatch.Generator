@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.0] - 2026-06-26
+
+### Added
+- **Pipeline behaviors** — mark a class `[Behavior(Order = N)]` to wrap all async dispatch calls in a compile-time-generated pipeline chain
+- `IPipelineBehavior<TCommand, TResult>` interface emitted into the generated attributes file
+- `Unit` struct for void-async (`Task`) handlers; behaviors receive `Func<Task<Unit>>` as `next`
+- Open-generic behaviors (`class MyBehavior<TCmd, TResult>`) registered via `AddScoped(typeof(MyBehavior<,>))` inside `AddAutoDispatch()`
+- Multiple behaviors ordered ascending by `Order`; lower `Order` = outermost (runs first)
+- Sync handlers (`T Send(...)`, `void Send(...)`) are not wrapped — pipeline applies to async only
+
 ## [1.2.0] - 2026-06-25
 
 ### Added
