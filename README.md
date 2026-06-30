@@ -1,6 +1,7 @@
 # AutoDispatch.Generator
 
 [![NuGet](https://img.shields.io/nuget/v/AutoDispatch.Generator.svg)](https://www.nuget.org/packages/AutoDispatch.Generator)
+[![NuGet Downloads](https://img.shields.io/nuget/dt/AutoDispatch.Generator.svg)](https://www.nuget.org/packages/AutoDispatch.Generator)
 [![CI](https://github.com/Swevo/AutoDispatch.Generator/actions/workflows/build.yml/badge.svg)](https://github.com/Swevo/AutoDispatch.Generator/actions/workflows/build.yml)
 
 AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T>`, `IRequestHandler<,>`, reflection, or runtime dispatch overhead. Mark a handler with `[Handler]`, write `Handle` or `HandleAsync`, and the generator emits a strongly-typed dispatcher at build time.
@@ -124,6 +125,28 @@ Rules:
 - Methods with zero parameters or more than two parameters are ignored
 - `Dispatcher` is generated as `internal sealed`
 - `AddAutoDispatch()` registers handlers with `AddScoped`
+
+## Semantic aliases
+
+`[CommandHandler]` and `[QueryHandler]` are aliases for `[Handler]` — use whichever reads best in your codebase.
+
+```csharp
+[CommandHandler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand command, CancellationToken ct = default)
+        => Task.FromResult(new OrderId(Guid.NewGuid()));
+}
+
+[QueryHandler]
+public sealed class GetOrderHandler
+{
+    public Task<Order?> HandleAsync(GetOrderQuery query, CancellationToken ct = default)
+        => Task.FromResult<Order?>(null);
+}
+```
+
+All three attributes are equivalent — the generated code is identical.
 
 ## Usage
 
@@ -283,6 +306,100 @@ The method still works; the warning helps you preserve cancellation flow.
 | **AutoDispatch** | Low | None | Compile-time generated | High | ✅ |
 | **MediatR** | Medium | Yes | Runtime reflection | High | ⚠️ |
 | **Raw service calls** | Low | None | Manual | High | ✅ |
+
+## Migrating from MediatR
+
+AutoDispatch follows the same CQRS mental model as MediatR, so migration is mechanical:
+
+### 1. Install AutoDispatch and remove MediatR
+
+```bash
+dotnet add package AutoDispatch.Generator
+dotnet remove package MediatR
+dotnet remove package MediatR.Extensions.Microsoft.DependencyInjection
+```
+
+### 2. Remove marker interfaces from commands
+
+```csharp
+// Before
+public sealed record CreateOrderCommand(string CustomerId) : IRequest<OrderId>;
+
+// After
+public sealed record CreateOrderCommand(string CustomerId);
+```
+
+### 3. Convert handler classes
+
+```csharp
+// Before
+public sealed class CreateOrderHandler : IRequestHandler<CreateOrderCommand, OrderId>
+{
+    public Task<OrderId> Handle(CreateOrderCommand request, CancellationToken cancellationToken)
+        => Task.FromResult(new OrderId(Guid.NewGuid()));
+}
+
+// After
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand command, CancellationToken ct = default)
+        => Task.FromResult(new OrderId(Guid.NewGuid()));
+}
+```
+
+### 4. Convert pipeline behaviors
+
+```csharp
+// Before
+public sealed class LoggingBehavior<TRequest, TResponse>
+    : IPipelineBehavior<TRequest, TResponse> where TRequest : notnull
+{
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
+    {
+        _logger.LogInformation("→ {Request}", typeof(TRequest).Name);
+        var result = await next();
+        _logger.LogInformation("← {Request}", typeof(TRequest).Name);
+        return result;
+    }
+}
+
+// After
+[Behavior(Order = 0)]
+public sealed class LoggingBehavior<TCommand, TResult>
+    : IPipelineBehavior<TCommand, TResult>
+{
+    public async Task<TResult> HandleAsync(TCommand command, Func<Task<TResult>> next, CancellationToken ct = default)
+    {
+        _logger.LogInformation("→ {Command}", typeof(TCommand).Name);
+        var result = await next();
+        _logger.LogInformation("← {Command}", typeof(TCommand).Name);
+        return result;
+    }
+}
+```
+
+### 5. Update DI registration
+
+```csharp
+// Before
+builder.Services.AddMediatR(cfg => cfg.RegisterServicesFromAssemblyContaining<Program>());
+
+// After
+builder.Services.AddAutoDispatch();
+```
+
+### 6. Update dispatch call sites
+
+```csharp
+// Before (IMediator)
+var orderId = await mediator.Send(new CreateOrderCommand(customerId), ct);
+
+// After (IDispatcher)
+var orderId = await dispatcher.SendAsync(new CreateOrderCommand(customerId), ct);
+```
+
+> **Tip:** Use the [AutoDispatch Migrator](https://github.com/Swevo/AutoDispatch.Generator) Copilot agent to automate the migration across your entire codebase.
 
 ## Best fit
 
