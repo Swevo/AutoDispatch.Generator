@@ -38,12 +38,12 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <None Include="....icon.png" Pack="true" PackagePath="" />
-    <None Include="....README.md" Pack="true" PackagePath="" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <None Include="$(OutputPath)$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
-    <None Include="buildAutoDispatch.props" Pack="true" PackagePath="build" />
-    <None Include="buildAutoDispatch.Generator.props" Pack="true" PackagePath="build" />
-    <None Include="buildAutoDispatch.Generator.targets" Pack="true" PackagePath="build" />
-    <None Include="copilotagentssecurity-checker.agent.md" Pack="true" PackagePath="copilotagents" />
+    <None Include="build\AutoDispatch.props" Pack="true" PackagePath="build\" />
+    <None Include="build\AutoDispatch.Generator.props" Pack="true" PackagePath="build\" />
+    <None Include="build\AutoDispatch.Generator.targets" Pack="true" PackagePath="build\" />
+    <None Include="copilot\agents\security-checker.agent.md" Pack="true" PackagePath="copilot\agents\" />
   </ItemGroup>
 </Project>
