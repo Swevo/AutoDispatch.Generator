@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0] - 2026-07-10
+
+### Added
+- **Validated pipeline behaviors** — `[Behavior]` classes are now checked at build time before the dispatcher is emitted
+- AD004 (Error): `[Behavior]` type must be a public, non-abstract open generic class with exactly two type parameters
+- AD005 (Error): `[Behavior]` type must implement `IPipelineBehavior<TCommand, TResult>`
+- AD006 (Error): `[Behavior]` type must expose a public `HandleAsync(TCommand, Func<Task<TResult>>, CancellationToken)` method
+
+### Changed
+- Behaviors with the same `Order` now execute in declaration order
+- Invalid behaviors are skipped from code generation so they do not break otherwise valid dispatch pipelines
+
 ## [1.3.0] - 2026-06-26
 
 ### Added

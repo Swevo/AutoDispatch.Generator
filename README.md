@@ -202,6 +202,12 @@ services.AddScoped<AutoDispatch.IDispatcher, AutoDispatch.Dispatcher>();
 
 `[Behavior(Order = N)]` wraps all async handlers in a compile-time pipeline. Identical mental model to MediatR's `IPipelineBehavior<,>` — but the chain is emitted as generated code, not resolved via reflection at runtime.
 
+Behavior requirements:
+
+- The behavior class must be **public**, **non-abstract**, and open-generic with exactly two type parameters
+- It must implement `IPipelineBehavior<TCommand, TResult>`
+- It must expose `public Task<TResult> HandleAsync(TCommand command, Func<Task<TResult>> next, CancellationToken ct = default)`
+
 ### Define a behavior
 
 ```csharp
@@ -246,6 +252,8 @@ public sealed class TimingBehavior<TCmd, TResult> : IPipelineBehavior<TCmd, TRes
 
 Execution order: Logging → Validation → Timing → Handler → Timing → Validation → Logging.
 
+When multiple behaviors have the same `Order`, AutoDispatch preserves declaration order.
+
 ### What gets generated
 
 For `Task<OrderId> SendAsync(CreateOrderCommand)` with two behaviors:
@@ -270,6 +278,8 @@ public Task<OrderId> SendAsync(CreateOrderCommand command, CancellationToken ct 
 
 For `Task` (no result) handlers, the generator wraps the call in `Task<Unit>` internally. `Unit` is emitted by the generator — you never reference it directly; the method signature stays `Task SendAsync(...)`.
 
+Behaviors can also short-circuit by returning a result without calling `next()`.
+
 ### Behaviors only apply to async handlers
 
 Sync `T Send(...)` and `void Send(...)` methods are not wrapped. Add a pipeline when you migrate a sync handler to async, or keep it sync for zero overhead.
@@ -281,6 +291,9 @@ Sync `T Send(...)` and `void Send(...)` methods are not wrapped. Add a pipeline 
 | AD001 | Warning | `[Handler]` on a class with no valid `Handle`/`HandleAsync` methods |
 | AD002 | Error | Duplicate handlers discovered for the same command type |
 | AD003 | Warning | `HandleAsync` does not accept `CancellationToken` |
+| AD004 | Error | `[Behavior]` type is not a public, non-abstract open generic class with exactly two type parameters |
+| AD005 | Error | `[Behavior]` type does not implement `IPipelineBehavior<TCommand, TResult>` |
+| AD006 | Error | `[Behavior]` type does not expose a valid public `HandleAsync` method |
 
 ### AD001
 
@@ -299,6 +312,24 @@ Each command/query type must map to exactly one handler method.
 > `HandleAsync` on '{Handler}' for command '{Command}' is missing a `CancellationToken` parameter. Consider adding `CancellationToken ct = default` as the second parameter.`
 
 The method still works; the warning helps you preserve cancellation flow.
+
+### AD004
+
+> `[Behavior]` on '{Type}' must be a public, non-abstract class with exactly two type parameters so AutoDispatch can close it as `<TCommand, TResult>`.`
+
+Pipeline behaviors are resolved as closed generics at dispatch time, so `[Behavior]` types must be declared as open generic classes such as `LoggingBehavior<TCommand, TResult>`.
+
+### AD005
+
+> `[Behavior]` on '{Type}' must implement `AutoDispatch.IPipelineBehavior<TCommand, TResult>` using its declared type parameters.`
+
+Implement the generated `IPipelineBehavior<TCommand, TResult>` interface directly on the behavior type.
+
+### AD006
+
+> `[Behavior]` on '{Type}' must declare `public Task<TResult> HandleAsync(TCommand command, Func<Task<TResult>> next, CancellationToken ct = default)`.`
+
+Explicit interface implementations are not enough — the generated dispatcher calls the behavior's public `HandleAsync` method directly.
 
 ## AutoDispatch vs alternatives
 
