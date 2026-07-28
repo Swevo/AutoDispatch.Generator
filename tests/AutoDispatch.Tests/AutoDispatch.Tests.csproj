@@ -13,8 +13,11 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.*" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.*" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\AutoDispatch\AutoDispatch.csproj" />
+    <ProjectReference Include="..\..\src\AutoDispatch.CodeFixes\AutoDispatch.CodeFixes.csproj" />
+    <ProjectReference Include="..\..\src\AutoDispatch.Testing\AutoDispatch.Testing.csproj" />
   </ItemGroup>
 </Project>

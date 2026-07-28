@@ -1077,4 +1077,84 @@ public sealed class LoggingBehavior<TCommand, TResult> : IPipelineBehavior<TComm
 
         Assert.Contains(diagnostics, d => d.Id == "AD006" && d.Severity == DiagnosticSeverity.Error);
     }
+
+    [Fact]
+    public void DocComment_ForwardedToInterfaceMethod_SyncHandler()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+public sealed record CreateOrderCommand(string CustomerId);
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    /// <summary>Creates an order for the given customer.</summary>
+    public void Handle(CreateOrderCommand cmd) { }
+}", out _);
+
+        var dispatcher = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("/// <summary>Creates an order for the given customer.</summary>", dispatcher);
+        Assert.Contains("void Send(global::CreateOrderCommand command);", dispatcher);
+    }
+
+    [Fact]
+    public void DocComment_ForwardedToInterfaceMethod_AsyncHandlerWithBehavior()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed record CreateOrderCommand(string CustomerId);
+
+[Behavior]
+public sealed class LoggingBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+{
+    public Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    /// <summary>Creates an order asynchronously.</summary>
+    /// <param name=""cmd"">The order to create.</param>
+    public Task HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var dispatcher = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("/// <summary>Creates an order asynchronously.</summary>", dispatcher);
+    }
+
+    [Fact]
+    public void PipelineComment_EmittedAboveDispatchMethod_ShowsBehaviorOrder()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed record CreateOrderCommand(string CustomerId);
+
+[Behavior(Order = 0)]
+public sealed class LoggingBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+{
+    public Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}
+
+[Behavior(Order = 1)]
+public sealed class ValidationBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+{
+    public Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var dispatcher = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("// Pipeline: LoggingBehavior -> ValidationBehavior -> CreateOrderHandler.HandleAsync -> LoggingBehavior -> ValidationBehavior", dispatcher);
+    }
 }

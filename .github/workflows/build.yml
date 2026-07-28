@@ -47,6 +47,8 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then VERSION="${GITHUB_REF#refs/tags/v}"; else VERSION="0.0.0-ci.${GITHUB_RUN_NUMBER}"; fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - run: dotnet pack src/AutoDispatch/AutoDispatch.csproj --configuration Release --no-build --output nupkgs /p:Version=${{ steps.version.outputs.version }}
+      - run: dotnet pack src/AutoDispatch.Testing/AutoDispatch.Testing.csproj --configuration Release --no-build --output nupkgs /p:Version=${{ steps.version.outputs.version }}
+      - run: dotnet pack templates/AutoDispatch.Templates/AutoDispatch.Templates.csproj --configuration Release --no-build --output nupkgs /p:Version=${{ steps.version.outputs.version }}
       - uses: actions/upload-artifact@v4
         with:
           name: nuget-package

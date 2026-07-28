@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.0] - 2026-07-28
+
+### Added
+- **XML doc-comment forwarding** — `///` doc comments on `Handle`/`HandleAsync` methods are now emitted above the corresponding generated `IDispatcher` member, so callers get real IntelliSense instead of undocumented generated code
+- **Pipeline order comments** — generated async dispatch methods with behaviors now include a `// Pipeline: A -> B -> Handler -> B -> A` comment showing execution order for readability
+- **IDE code fixes** — `AutoDispatch.CodeFixes` (shipped inside the same NuGet package) adds quick fixes for AD001 (adds a `HandleAsync` stub method) and AD003 (adds the missing `CancellationToken ct = default` parameter)
+- **AutoDispatch.Testing** — new companion package with `FakeServiceProvider` (a minimal `IServiceProvider` test double) and `PipelineTestHarness` (compose/short-circuit `[Behavior]` chains in tests) for unit testing handlers and behaviors without a full DI container
+- **AutoDispatch.Templates** — new `dotnet new` item template package; `dotnet new install AutoDispatch.Templates` then `dotnet new autodispatch-handler -n CreateOrder` scaffolds a command + `[Handler]` pair
+
 ## [1.4.0] - 2026-07-10
 
 ### Added

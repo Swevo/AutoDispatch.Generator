@@ -228,7 +228,8 @@ namespace AutoDispatch
             MethodName = "Handle",
             IsAsync = false,
             HasCancellationTokenParameter = false,
-            Location = method.Locations.FirstOrDefault() ?? handler.Location
+            Location = method.Locations.FirstOrDefault() ?? handler.Location,
+            DocCommentXml = GetDocCommentXml(method)
         });
     }
 
@@ -265,8 +266,60 @@ namespace AutoDispatch
             IsAsync = true,
             HasCancellationTokenParameter = method.Parameters.Length == 2,
             AsyncResultTypeFqn = GetAsyncResultTypeFqn(method.ReturnType),
-            Location = method.Locations.FirstOrDefault() ?? handler.Location
+            Location = method.Locations.FirstOrDefault() ?? handler.Location,
+            DocCommentXml = GetDocCommentXml(method)
         });
+    }
+
+    /// <summary>
+    /// Reads the handler method's own XML doc comment (if any) so it can be forwarded onto
+    /// the generated <c>IDispatcher</c> member, giving callers real IntelliSense instead of
+    /// undocumented generated code.
+    /// </summary>
+    private static string? GetDocCommentXml(IMethodSymbol method)
+    {
+        var xml = method.GetDocumentationCommentXml(expandIncludes: true);
+        return string.IsNullOrWhiteSpace(xml) ? null : xml;
+    }
+
+    /// <summary>
+    /// Converts a symbol's raw `GetDocumentationCommentXml()` output (a single
+    /// &lt;member&gt;...&lt;/member&gt; fragment) into indented `///` doc-comment lines
+    /// suitable for emission above a generated member.
+    /// </summary>
+    private static void AppendDocComment(StringBuilder sb, string? docCommentXml, string indent)
+    {
+        if (string.IsNullOrWhiteSpace(docCommentXml))
+        {
+            return;
+        }
+
+        System.Xml.Linq.XElement member;
+        try
+        {
+            member = System.Xml.Linq.XElement.Parse(docCommentXml);
+        }
+        catch (System.Xml.XmlException)
+        {
+            return;
+        }
+
+        foreach (var node in member.Nodes())
+        {
+            var text = node.ToString(System.Xml.Linq.SaveOptions.DisableFormatting);
+            foreach (var line in text.Split('\n'))
+            {
+                var trimmed = line.TrimEnd('\r').Trim();
+                if (trimmed.Length == 0)
+                {
+                    continue;
+                }
+
+                sb.Append(indent);
+                sb.Append("/// ");
+                sb.AppendLine(trimmed);
+            }
+        }
     }
 
     private static void Generate(SourceProductionContext context, ImmutableArray<HandlerInfo> handlers, ImmutableArray<BehaviorCandidate> behaviorCandidates)
@@ -395,6 +448,8 @@ namespace AutoDispatch
 
         foreach (var method in methods)
         {
+            AppendDocComment(sb, method.DocCommentXml, "        ");
+
             sb.Append("        ");
             sb.Append(GetInterfaceReturnType(method));
             sb.Append(' ');
@@ -424,6 +479,7 @@ namespace AutoDispatch
             if (!method.IsAsync || !hasBehaviors)
             {
                 // Simple expression-body form (sync or async with no behaviors)
+                AppendDocComment(sb, method.DocCommentXml, "        ");
                 sb.Append("        public ");
                 sb.Append(GetInterfaceReturnType(method));
                 sb.Append(' ');
@@ -456,6 +512,12 @@ namespace AutoDispatch
                 var resultFqn = method.AsyncResultTypeFqn ?? "global::AutoDispatch.Unit";
                 var pipelineType = $"global::System.Func<global::System.Threading.Tasks.Task<{resultFqn}>>";
 
+                AppendDocComment(sb, method.DocCommentXml, "        ");
+
+                // Pipeline execution order, outermost-first, to make the generated chain easy to reason about.
+                var handlerShortName = GetShortTypeName(method.HandlerTypeFqn);
+                var pipelineOrder = string.Join(" -> ", sortedBehaviors.Select(static b => GetShortTypeName(b.UnboundTypeFqn)));
+                sb.AppendLine($"        // Pipeline: {pipelineOrder} -> {handlerShortName}.{method.MethodName} -> {pipelineOrder}");
                 sb.AppendLine($"        public {GetInterfaceReturnType(method)} {GetDispatchMethodName(method)}({method.CommandTypeFqn} command, global::System.Threading.CancellationToken ct = default)");
                 sb.AppendLine("        {");
 
@@ -562,6 +624,25 @@ namespace AutoDispatch
 
     private static string GetDispatchMethodName(DispatchMethodInfo method) =>
         method.IsAsync ? "SendAsync" : "Send";
+
+    /// <summary>Strips "global::", namespace segments, and generic arity from a fully-qualified type name for readable pipeline comments.</summary>
+    private static string GetShortTypeName(string fullyQualifiedName)
+    {
+        var name = fullyQualifiedName;
+        if (name.StartsWith("global::", StringComparison.Ordinal))
+        {
+            name = name.Substring("global::".Length);
+        }
+
+        var genericIndex = name.IndexOf('<');
+        if (genericIndex >= 0)
+        {
+            name = name.Substring(0, genericIndex);
+        }
+
+        var lastDot = name.LastIndexOf('.');
+        return lastDot >= 0 ? name.Substring(lastDot + 1) : name;
+    }
 
     private static string GetInterfaceReturnType(DispatchMethodInfo method) =>
         method.ReturnTypeFqn;
@@ -743,6 +824,8 @@ namespace AutoDispatch
         public string? AsyncResultTypeFqn { get; set; }
 
         public Location Location { get; set; } = Location.None;
+
+        public string? DocCommentXml { get; set; }
     }
 
     private sealed class BehaviorInfo

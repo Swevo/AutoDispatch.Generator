@@ -331,6 +331,83 @@ Implement the generated `IPipelineBehavior<TCommand, TResult>` interface directl
 
 Explicit interface implementations are not enough — the generated dispatcher calls the behavior's public `HandleAsync` method directly.
 
+## XML doc comments and pipeline readability
+
+Doc comments on `Handle`/`HandleAsync` methods are forwarded to the generated `IDispatcher` member automatically:
+
+```csharp
+[Handler]
+public sealed class CreateOrderHandler
+{
+    /// <summary>Creates an order for the given customer.</summary>
+    public Task<OrderId> HandleAsync(CreateOrderCommand command, CancellationToken ct = default)
+        => Task.FromResult(new OrderId(Guid.NewGuid()));
+}
+```
+
+generates:
+
+```csharp
+public interface IDispatcher
+{
+    /// <summary>Creates an order for the given customer.</summary>
+    Task<OrderId> SendAsync(CreateOrderCommand command, CancellationToken ct = default);
+}
+```
+
+Generated async dispatch methods that go through a behavior pipeline are also annotated with a
+comment showing the execution order, so you never have to guess:
+
+```csharp
+// Pipeline: LoggingBehavior -> ValidationBehavior -> CreateOrderHandler.HandleAsync -> LoggingBehavior -> ValidationBehavior
+public Task<OrderId> SendAsync(CreateOrderCommand command, CancellationToken ct = default)
+{
+    ...
+}
+```
+
+## IDE code fixes
+
+`AutoDispatch.CodeFixes` ships inside the `AutoDispatch.Generator` package and adds one-click fixes:
+
+| Diagnostic | Quick fix |
+|---|---|
+| AD001 | Adds a `HandleAsync` stub method to a `[Handler]` class with none |
+| AD003 | Adds the missing `CancellationToken ct = default` parameter |
+
+## Testing handlers and behaviors
+
+The [`AutoDispatch.Testing`](https://www.nuget.org/packages/AutoDispatch.Testing) package makes it
+easy to unit test handlers and `[Behavior]` chains without a DI container:
+
+```bash
+dotnet add package AutoDispatch.Testing
+```
+
+```csharp
+// FakeServiceProvider — a minimal IServiceProvider for constructing the generated Dispatcher
+var sp = new FakeServiceProvider().Add(new CreateOrderHandler());
+IDispatcher dispatcher = new Dispatcher(sp);
+var orderId = await dispatcher.SendAsync(new CreateOrderCommand("cust-1"));
+
+// PipelineTestHarness — test a behavior in isolation, short-circuiting next()
+var result = await PipelineTestHarness.InvokeAsync<CreateOrderCommand, OrderId>(
+    loggingBehavior.HandleAsync,
+    command,
+    nextResult: expectedOrderId);
+```
+
+See the [AutoDispatch.Testing README](src/AutoDispatch.Testing/README.md) for more.
+
+## Scaffolding with dotnet new
+
+```bash
+dotnet new install AutoDispatch.Templates
+dotnet new autodispatch-handler -n CreateOrder --namespace MyApp.Orders
+```
+
+Generates a ready-to-fill `CreateOrderCommand.cs` with the command record and `[Handler]` class.
+
 ## AutoDispatch vs alternatives
 
 | Approach | Boilerplate | Runtime dispatch | Pipeline behaviors | Compile-time safety | AOT |
@@ -338,6 +415,19 @@ Explicit interface implementations are not enough — the generated dispatcher c
 | **AutoDispatch** | Low | None | Compile-time generated | High | ✅ |
 | **MediatR** | Medium | Yes | Runtime reflection | High | ⚠️ |
 | **Raw service calls** | Low | None | Manual | High | ✅ |
+
+### Benchmarks
+
+[BenchmarkDotNet results](benchmarks/AutoDispatch.Benchmarks/README.md) for a single no-op
+handler, comparing the generated `IDispatcher` against MediatR's `IMediator`:
+
+| Method                 | Mean     | Ratio | Allocated | Alloc Ratio |
+|----------------------- |---------:|------:|----------:|------------:|
+| AutoDispatch_SendAsync | 23.42 ns |  1.00 |      96 B |        1.00 |
+| MediatR_Send           | 89.13 ns |  3.85 |     288 B |        3.00 |
+
+**~3.8x faster, 3x fewer allocations** — no reflection-based handler lookup, no runtime-built
+pipeline. Run it yourself with `dotnet run -c Release` in `benchmarks/AutoDispatch.Benchmarks`.
 
 ## Migrating from MediatR
 
