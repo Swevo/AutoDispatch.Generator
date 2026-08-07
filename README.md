@@ -4,6 +4,7 @@
 [![NuGet Downloads](https://img.shields.io/nuget/dt/AutoDispatch.Generator.svg)](https://www.nuget.org/packages/AutoDispatch.Generator)
 [![CI](https://github.com/Swevo/AutoDispatch.Generator/actions/workflows/build.yml/badge.svg)](https://github.com/Swevo/AutoDispatch.Generator/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![.NET 10 Ready](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet)](#)
 
 AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T>`, `IRequestHandler<,>`, reflection, or runtime dispatch overhead. Mark a handler with `[Handler]`, write `Handle` or `HandleAsync`, and the generator emits a strongly-typed dispatcher at build time.
 
