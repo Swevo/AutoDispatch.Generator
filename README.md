@@ -466,9 +466,11 @@ See the [AutoDispatch.Testing README](src/AutoDispatch.Testing/README.md) for mo
 ```bash
 dotnet new install AutoDispatch.Templates
 dotnet new autodispatch-handler -n CreateOrder --namespace MyApp.Orders
+dotnet new autodispatch-notification -n OrderCreated --namespace MyApp.Orders
 ```
 
-Generates a ready-to-fill `CreateOrderCommand.cs` with the command record and `[Handler]` class.
+Generates a ready-to-fill `CreateOrderCommand.cs` with the command record and `[Handler]` class,
+or `OrderCreatedNotification.cs` with the notification record and `[NotificationHandler]` class.
 
 ## AutoDispatch vs alternatives
 

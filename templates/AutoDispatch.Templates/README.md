@@ -1,7 +1,8 @@
 # AutoDispatch.Templates
 
-`dotnet new` item template that scaffolds a command + `[Handler]` class pair for
-[AutoDispatch.Generator](https://www.nuget.org/packages/AutoDispatch.Generator).
+`dotnet new` item templates that scaffold code for
+[AutoDispatch.Generator](https://www.nuget.org/packages/AutoDispatch.Generator):
+a command + `[Handler]` pair, or a notification + `[NotificationHandler]` pair.
 
 ## Install
 
@@ -10,6 +11,8 @@ dotnet new install AutoDispatch.Templates
 ```
 
 ## Use
+
+### Command + Handler
 
 ```bash
 dotnet new autodispatch-handler -n CreateOrder --namespace MyApp.Orders
@@ -32,6 +35,33 @@ public sealed class CreateOrderHandler
     }
 }
 ```
+
+### Notification + NotificationHandler
+
+```bash
+dotnet new autodispatch-notification -n OrderCreated --namespace MyApp.Orders
+```
+
+Generates `OrderCreatedNotification.cs`:
+
+```csharp
+namespace MyApp.Orders;
+
+public sealed record OrderCreatedNotification(/* TODO: add notification properties */ string Value);
+
+[AutoDispatch.NotificationHandler]
+public sealed class OrderCreatedHandler
+{
+    public System.Threading.Tasks.Task HandleAsync(OrderCreatedNotification notification, System.Threading.CancellationToken ct = default)
+    {
+        // TODO: implement handler logic.
+        throw new System.NotImplementedException();
+    }
+}
+```
+
+Run the command again with a different `-n` to add another handler for the same
+notification type — any number of `[NotificationHandler]` classes may subscribe to it.
 
 ## Uninstall
 

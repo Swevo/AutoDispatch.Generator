@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **`autodispatch-notification` item template** — `AutoDispatch.Templates` (bumped to 1.1.0) now scaffolds a notification record + `[NotificationHandler]` class via `dotnet new autodispatch-notification -n OrderCreated`, matching the existing `autodispatch-handler` template for commands
+
 ## [1.6.1] - 2026-09-15
 
 ### Added
