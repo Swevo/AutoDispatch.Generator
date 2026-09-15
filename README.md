@@ -434,6 +434,8 @@ public Task<OrderId> SendAsync(CreateOrderCommand command, CancellationToken ct 
 |---|---|
 | AD001 | Adds a `HandleAsync` stub method to a `[Handler]` class with none |
 | AD003 | Adds the missing `CancellationToken ct = default` parameter |
+| AD007 | Adds a `HandleAsync` stub method to a `[NotificationHandler]` class with none |
+| AD008 | Adds the missing `CancellationToken ct = default` parameter to a notification `HandleAsync` |
 
 ## Testing handlers and behaviors
 

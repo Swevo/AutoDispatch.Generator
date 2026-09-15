@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.6.1] - 2026-09-15
+
+### Added
+- **IDE code fixes for notifications** — `AutoDispatch.CodeFixes` now also fixes AD007 (adds a `HandleAsync` stub to a `[NotificationHandler]` class with none) and AD008 (adds the missing `CancellationToken ct = default` parameter), matching the existing AD001/AD003 quick fixes for commands
+
 ## [1.6.0] - 2026-09-15
 
 ### Added

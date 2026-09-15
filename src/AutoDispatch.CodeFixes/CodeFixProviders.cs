@@ -13,14 +13,14 @@ using System.Threading.Tasks;
 namespace AutoDispatch.CodeFixes;
 
 /// <summary>
-/// Quick fix for AD003: adds the missing <c>CancellationToken ct = default</c> parameter
-/// to a <c>HandleAsync</c> method so cancellation flows through the generated dispatcher.
+/// Quick fix for AD003 and AD008: adds the missing <c>CancellationToken ct = default</c> parameter
+/// to a <c>HandleAsync</c> method so cancellation flows through the generated dispatcher/publisher.
 /// </summary>
 [ExportCodeFixProvider(LanguageNames.CSharp, Name = nameof(AddCancellationTokenCodeFixProvider))]
 [Shared]
 public sealed class AddCancellationTokenCodeFixProvider : CodeFixProvider
 {
-    public override ImmutableArray<string> FixableDiagnosticIds { get; } = ImmutableArray.Create("AD003");
+    public override ImmutableArray<string> FixableDiagnosticIds { get; } = ImmutableArray.Create("AD003", "AD008");
 
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;
 
@@ -67,19 +67,20 @@ public sealed class AddCancellationTokenCodeFixProvider : CodeFixProvider
 }
 
 /// <summary>
-/// Quick fix for AD001: adds a starter <c>HandleAsync</c> method to a <c>[Handler]</c> class
-/// that currently has none, so the diagnostic can be resolved without leaving the IDE.
+/// Quick fix for AD001 and AD007: adds a starter <c>HandleAsync</c> method to a <c>[Handler]</c>
+/// or <c>[NotificationHandler]</c> class that currently has none, so the diagnostic can be
+/// resolved without leaving the IDE.
 /// </summary>
 [ExportCodeFixProvider(LanguageNames.CSharp, Name = nameof(AddHandleAsyncStubCodeFixProvider))]
 [Shared]
 public sealed class AddHandleAsyncStubCodeFixProvider : CodeFixProvider
 {
-    private const string StubMethod = @"public System.Threading.Tasks.Task HandleAsync(/* TODO: replace object with your command type */ object command, System.Threading.CancellationToken ct = default)
+    private const string StubMethod = @"public System.Threading.Tasks.Task HandleAsync(/* TODO: replace object with your command/notification type */ object command, System.Threading.CancellationToken ct = default)
     {
         throw new System.NotImplementedException();
     }";
 
-    public override ImmutableArray<string> FixableDiagnosticIds { get; } = ImmutableArray.Create("AD001");
+    public override ImmutableArray<string> FixableDiagnosticIds { get; } = ImmutableArray.Create("AD001", "AD007");
 
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;
 

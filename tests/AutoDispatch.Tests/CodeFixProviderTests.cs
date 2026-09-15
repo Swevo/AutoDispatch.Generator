@@ -134,4 +134,77 @@ public sealed class EmptyHandler
         Assert.Contains("HandleAsync", newText);
         Assert.Contains("NotImplementedException", newText);
     }
+
+    [Fact]
+    public async Task AD008_CodeFix_AddsCancellationTokenParameter()
+    {
+        var (document, _) = await CreateDocumentAsync(@"
+using AutoDispatch;
+using System.Threading.Tasks;
+
+public sealed record OrderCreated(string OrderId);
+
+[NotificationHandler]
+public sealed class LogOrderCreated
+{
+    public Task HandleAsync(OrderCreated notification) => Task.CompletedTask;
+}");
+
+        var compilation = (await document.Project.GetCompilationAsync())!;
+        var driver = CSharpGeneratorDriver.Create(new AutoDispatchGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+        var ad008 = diagnostics.First(d => d.Id == "AD008");
+
+        var tree = await document.GetSyntaxTreeAsync();
+        var mappedDiagnostic = Diagnostic.Create(ad008.Descriptor, Location.Create(tree!, ad008.Location.SourceSpan));
+
+        var provider = new AddCancellationTokenCodeFixProvider();
+        CodeAction? registeredAction = null;
+        var context = new CodeFixContext(document, mappedDiagnostic, (action, _) => registeredAction = action, default);
+        await provider.RegisterCodeFixesAsync(context);
+
+        Assert.NotNull(registeredAction);
+        var operations = await registeredAction!.GetOperationsAsync(default);
+        var applyChanges = operations.OfType<ApplyChangesOperation>().Single();
+        var newDocument = applyChanges.ChangedSolution.GetDocument(document.Id)!;
+        var newText = (await newDocument.GetTextAsync()).ToString();
+
+        Assert.Contains("CancellationToken ct = default", newText);
+    }
+
+    [Fact]
+    public async Task AD007_CodeFix_AddsHandleAsyncStub()
+    {
+        var (document, _) = await CreateDocumentAsync(@"
+using AutoDispatch;
+
+public sealed record OrderCreated(string OrderId);
+
+[NotificationHandler]
+public sealed class EmptyNotificationHandler
+{
+}");
+
+        var compilation = (await document.Project.GetCompilationAsync())!;
+        var driver = CSharpGeneratorDriver.Create(new AutoDispatchGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+        var ad007 = diagnostics.First(d => d.Id == "AD007");
+
+        var tree = await document.GetSyntaxTreeAsync();
+        var mappedDiagnostic = Diagnostic.Create(ad007.Descriptor, Location.Create(tree!, ad007.Location.SourceSpan));
+
+        var provider = new AddHandleAsyncStubCodeFixProvider();
+        CodeAction? registeredAction = null;
+        var context = new CodeFixContext(document, mappedDiagnostic, (action, _) => registeredAction = action, default);
+        await provider.RegisterCodeFixesAsync(context);
+
+        Assert.NotNull(registeredAction);
+        var operations = await registeredAction!.GetOperationsAsync(default);
+        var applyChanges = operations.OfType<ApplyChangesOperation>().Single();
+        var newDocument = applyChanges.ChangedSolution.GetDocument(document.Id)!;
+        var newText = (await newDocument.GetTextAsync()).ToString();
+
+        Assert.Contains("HandleAsync", newText);
+        Assert.Contains("NotImplementedException", newText);
+    }
 }
