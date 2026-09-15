@@ -2,7 +2,8 @@
 
 `dotnet new` item templates that scaffold code for
 [AutoDispatch.Generator](https://www.nuget.org/packages/AutoDispatch.Generator):
-a command + `[Handler]` pair, or a notification + `[NotificationHandler]` pair.
+a command + `[Handler]` pair, a notification + `[NotificationHandler]` pair, or a streaming
+query + `[StreamHandler]` pair.
 
 ## Install
 
@@ -62,6 +63,31 @@ public sealed class OrderCreatedHandler
 
 Run the command again with a different `-n` to add another handler for the same
 notification type — any number of `[NotificationHandler]` classes may subscribe to it.
+
+### Streaming query + StreamHandler
+
+```bash
+dotnet new autodispatch-stream -n GetOrders --namespace MyApp.Orders
+```
+
+Generates `GetOrdersQuery.cs`:
+
+```csharp
+namespace MyApp.Orders;
+
+public sealed record GetOrdersQuery(/* TODO: add query properties */ string Value);
+
+[AutoDispatch.StreamHandler]
+public sealed class GetOrdersHandler
+{
+    public System.Collections.Generic.IAsyncEnumerable<object> HandleAsync(GetOrdersQuery query, System.Threading.CancellationToken ct = default)
+    {
+        // TODO: replace object with your result type, then reimplement this as an async iterator
+        // that yields items as they become available.
+        throw new System.NotImplementedException();
+    }
+}
+```
 
 ## Uninstall
 

@@ -78,6 +78,20 @@ namespace AutoDispatch
         public HandlerLifetime Lifetime { get; set; } = HandlerLifetime.Scoped;
     }
 
+    /// <summary>
+    /// Marks a class as a streaming query handler. Declare a public
+    /// <c>IAsyncEnumerable&lt;TResult&gt; HandleAsync(TQuery query, CancellationToken ct = default)</c>
+    /// method — AutoDispatch generates a matching <c>StreamAsync</c> method on <c>IDispatcher</c>
+    /// that returns the handler's async stream directly, with no buffering. Like <c>[Handler]</c>,
+    /// exactly one handler is allowed per query type.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class StreamHandlerAttribute : Attribute
+    {
+        /// <summary>The DI lifetime for this handler. Defaults to Scoped.</summary>
+        public HandlerLifetime Lifetime { get; set; } = HandlerLifetime.Scoped;
+    }
+
     public interface IPipelineBehavior<TCommand, TResult>
     {
         System.Threading.Tasks.Task<TResult> HandleAsync(
@@ -152,6 +166,30 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD009 = new(
+        id: "AD009",
+        title: "Stream handler has no dispatch method",
+        messageFormat: "[StreamHandler] on '{0}' has no `HandleAsync(TQuery, CancellationToken)` method returning `IAsyncEnumerable<TResult>`. No streaming dispatch will be generated.",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD010 = new(
+        id: "AD010",
+        title: "Duplicate stream handler for query",
+        messageFormat: "Duplicate stream handler for query '{0}': both '{1}' and '{2}' define a `HandleAsync` stream method for this query type. Remove one handler or rename the method.",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD011 = new(
+        id: "AD011",
+        title: "Stream HandleAsync missing CancellationToken",
+        messageFormat: "`HandleAsync` on '{0}' for query '{1}' is missing a `CancellationToken` parameter. Consider adding `CancellationToken ct = default` as the second parameter.",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -184,13 +222,22 @@ namespace AutoDispatch
             .Select(static (info, _) => info!)
             .Collect();
 
-        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers);
+        var streamHandlers = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.StreamHandlerAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax,
+                transform: static (ctx, ct) => TransformStreamHandler(ctx, ct))
+            .Where(static info => info is not null)
+            .Select(static (info, _) => info!)
+            .Collect();
+
+        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var ((handlersTuple, behaviorList), notificationList) = tuple;
+            var (((handlersTuple, behaviorList), notificationList), streamList) = tuple;
             var ((h1, h2), h3) = handlersTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList);
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList);
         });
     }
 
@@ -317,6 +364,76 @@ namespace AutoDispatch
         });
     }
 
+    private static StreamHandlerInfo? TransformStreamHandler(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return null;
+        }
+
+        var info = new StreamHandlerInfo
+        {
+            HandlerTypeFqn = ToFullyQualified(typeSymbol),
+            HandlerDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
+            Location = typeSymbol.Locations.FirstOrDefault() ?? Location.None,
+            LifetimeMethod = ReadLifetimeMethod(context.Attributes)
+        };
+
+        var cancellationTokenType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
+
+        foreach (var member in typeSymbol.GetMembers("HandleAsync").OfType<IMethodSymbol>())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (member.MethodKind != MethodKind.Ordinary ||
+                member.IsStatic ||
+                member.DeclaredAccessibility != Accessibility.Public)
+            {
+                continue;
+            }
+
+            TryAddStreamMethod(info, member, cancellationTokenType);
+        }
+
+        return info;
+    }
+
+    private static void TryAddStreamMethod(
+        StreamHandlerInfo handler,
+        IMethodSymbol method,
+        INamedTypeSymbol? cancellationTokenType)
+    {
+        if (method.Parameters.Length is < 1 or > 2)
+        {
+            return;
+        }
+
+        var resultTypeFqn = GetAsyncEnumerableResultTypeFqn(method.ReturnType);
+        if (resultTypeFqn is null)
+        {
+            return;
+        }
+
+        if (method.Parameters.Length == 2 &&
+            (cancellationTokenType is null ||
+             !SymbolEqualityComparer.Default.Equals(method.Parameters[1].Type, cancellationTokenType)))
+        {
+            return;
+        }
+
+        handler.Methods.Add(new StreamMethodInfo
+        {
+            QueryTypeFqn = ToFullyQualified(method.Parameters[0].Type),
+            QueryDisplayName = method.Parameters[0].Type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
+            HandlerTypeFqn = handler.HandlerTypeFqn,
+            HandlerDisplayName = handler.HandlerDisplayName,
+            ResultTypeFqn = resultTypeFqn,
+            HasCancellationTokenParameter = method.Parameters.Length == 2,
+            Location = method.Locations.FirstOrDefault() ?? handler.Location,
+            DocCommentXml = GetDocCommentXml(method)
+        });
+    }
+
     private static void TryAddSyncMethod(HandlerInfo handler, IMethodSymbol method)
     {
         if (method.Parameters.Length != 1 || IsTaskLike(method.ReturnType))
@@ -432,7 +549,8 @@ namespace AutoDispatch
         SourceProductionContext context,
         ImmutableArray<HandlerInfo> handlers,
         ImmutableArray<BehaviorCandidate> behaviorCandidates,
-        ImmutableArray<NotificationHandlerInfo> notificationHandlers)
+        ImmutableArray<NotificationHandlerInfo> notificationHandlers,
+        ImmutableArray<StreamHandlerInfo> streamHandlers)
     {
         var behaviors = new List<BehaviorInfo>();
         var seenBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -566,16 +684,83 @@ namespace AutoDispatch
                 .ToArray();
         }
 
-        if (dispatchMethods.Length == 0 && notificationGroups.Length == 0)
+        var streamMethods = Array.Empty<StreamMethodInfo>();
+
+        if (!streamHandlers.IsDefaultOrEmpty)
+        {
+            var methods = new List<StreamMethodInfo>();
+
+            foreach (var handler in streamHandlers)
+            {
+                registrations[handler.HandlerTypeFqn] = handler.LifetimeMethod;
+
+                if (handler.Methods.Count == 0)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        AD009,
+                        handler.Location,
+                        handler.HandlerDisplayName));
+                    continue;
+                }
+
+                foreach (var method in handler.Methods)
+                {
+                    methods.Add(method);
+
+                    if (!method.HasCancellationTokenParameter)
+                    {
+                        context.ReportDiagnostic(Diagnostic.Create(
+                            AD011,
+                            method.Location,
+                            method.HandlerDisplayName,
+                            method.QueryDisplayName));
+                    }
+                }
+            }
+
+            var duplicateQueries = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var group in methods.GroupBy(static method => method.QueryTypeFqn, StringComparer.Ordinal))
+            {
+                if (group.Count() <= 1)
+                {
+                    continue;
+                }
+
+                duplicateQueries.Add(group.Key);
+                var ordered = group
+                    .OrderBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal)
+                    .ToArray();
+
+                var first = ordered[0];
+                for (var i = 1; i < ordered.Length; i++)
+                {
+                    var duplicate = ordered[i];
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        AD010,
+                        duplicate.Location,
+                        duplicate.QueryDisplayName,
+                        first.HandlerDisplayName,
+                        duplicate.HandlerDisplayName));
+                }
+            }
+
+            streamMethods = methods
+                .Where(method => !duplicateQueries.Contains(method.QueryTypeFqn))
+                .OrderBy(static method => method.QueryTypeFqn, StringComparer.Ordinal)
+                .ThenBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        if (dispatchMethods.Length == 0 && notificationGroups.Length == 0 && streamMethods.Length == 0)
         {
             return;
         }
 
-        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups));
+        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods));
         context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors));
     }
 
-    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups)
+    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods)
     {
         var sortedBehaviors = behaviors
             .OrderBy(static b => b.Order)
@@ -621,6 +806,16 @@ namespace AutoDispatch
             sb.Append("        global::System.Threading.Tasks.Task PublishAsync(");
             sb.Append(group.NotificationTypeFqn);
             sb.AppendLine(" notification, global::System.Threading.CancellationToken ct = default);");
+        }
+
+        foreach (var method in streamMethods)
+        {
+            AppendDocComment(sb, method.DocCommentXml, "        ");
+            sb.Append("        global::System.Collections.Generic.IAsyncEnumerable<");
+            sb.Append(method.ResultTypeFqn);
+            sb.Append("> StreamAsync(");
+            sb.Append(method.QueryTypeFqn);
+            sb.AppendLine(" query, global::System.Threading.CancellationToken ct = default);");
         }
 
         sb.AppendLine("    }");
@@ -730,6 +925,29 @@ namespace AutoDispatch
             sb.AppendLine();
         }
 
+        foreach (var method in streamMethods)
+        {
+            // Streaming queries are request/response like Send — exactly one handler per query
+            // type. The generated method delegates directly to the handler's async stream with
+            // no buffering; there is no pipeline-behavior support for streams in this version.
+            AppendDocComment(sb, method.DocCommentXml, "        ");
+            sb.Append("        public global::System.Collections.Generic.IAsyncEnumerable<");
+            sb.Append(method.ResultTypeFqn);
+            sb.Append("> StreamAsync(");
+            sb.Append(method.QueryTypeFqn);
+            sb.AppendLine(" query, global::System.Threading.CancellationToken ct = default)");
+            sb.Append("            => this._sp.GetRequiredService<");
+            sb.Append(method.HandlerTypeFqn);
+            sb.Append(">().HandleAsync(query");
+            if (method.HasCancellationTokenParameter)
+            {
+                sb.Append(", ct");
+            }
+
+            sb.AppendLine(");");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("    }");
         sb.AppendLine("}");
         return sb.ToString();
@@ -835,6 +1053,17 @@ namespace AutoDispatch
     private static string? GetAsyncResultTypeFqn(ITypeSymbol returnType)
     {
         if (returnType is INamedTypeSymbol { TypeArguments.Length: 1 } named)
+        {
+            return ToFullyQualified(named.TypeArguments[0]);
+        }
+
+        return null;
+    }
+
+    private static string? GetAsyncEnumerableResultTypeFqn(ITypeSymbol returnType)
+    {
+        if (returnType is INamedTypeSymbol { TypeArguments.Length: 1 } named &&
+            named.ConstructedFrom.ToDisplayString() == "System.Collections.Generic.IAsyncEnumerable<T>")
         {
             return ToFullyQualified(named.TypeArguments[0]);
         }
@@ -1076,5 +1305,37 @@ namespace AutoDispatch
         public string NotificationTypeFqn { get; }
 
         public IReadOnlyList<NotificationMethodInfo> Methods { get; }
+    }
+
+    private sealed class StreamHandlerInfo
+    {
+        public string HandlerTypeFqn { get; set; } = string.Empty;
+
+        public string HandlerDisplayName { get; set; } = string.Empty;
+
+        public Location Location { get; set; } = Location.None;
+
+        public string LifetimeMethod { get; set; } = "AddScoped";
+
+        public List<StreamMethodInfo> Methods { get; } = new();
+    }
+
+    private sealed class StreamMethodInfo
+    {
+        public string QueryTypeFqn { get; set; } = string.Empty;
+
+        public string QueryDisplayName { get; set; } = string.Empty;
+
+        public string HandlerTypeFqn { get; set; } = string.Empty;
+
+        public string HandlerDisplayName { get; set; } = string.Empty;
+
+        public string ResultTypeFqn { get; set; } = string.Empty;
+
+        public bool HasCancellationTokenParameter { get; set; }
+
+        public Location Location { get; set; } = Location.None;
+
+        public string? DocCommentXml { get; set; }
     }
 }

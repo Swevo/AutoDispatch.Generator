@@ -112,6 +112,23 @@ namespace Microsoft.Extensions.DependencyInjection
         await task;
     }
 
+    private static async Task<List<int>> InvokeStreamAsync(Assembly assembly, string queryTypeName)
+    {
+        var queryType = assembly.GetType(queryTypeName, throwOnError: true)!;
+        var dispatcherType = assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var dispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+        var streamAsync = dispatcherType.GetMethod("StreamAsync", BindingFlags.Instance | BindingFlags.Public)!;
+        var stream = (IAsyncEnumerable<int>)streamAsync.Invoke(dispatcher, new object[] { Activator.CreateInstance(queryType)!, CancellationToken.None })!;
+
+        var results = new List<int>();
+        await foreach (var item in stream)
+        {
+            results.Add(item);
+        }
+
+        return results;
+    }
+
     private static IReadOnlyList<string> GetRecorderEntries(Assembly assembly)
     {
         var recorderType = assembly.GetType("Recorder", throwOnError: true)!;
@@ -1359,5 +1376,174 @@ public sealed class EmailHandler
         await InvokePublishAsync(compiled.Assembly, "OrderCreated");
 
         Assert.NotNull(result);
+    }
+
+    // ---- Streaming queries ----
+
+    [Fact]
+    public void StreamHandler_GeneratesStreamAsyncOnDispatcher()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        yield return 1;
+        yield return 2;
+    }
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("global::System.Collections.Generic.IAsyncEnumerable<global::System.Int32> StreamAsync(global::GetNumbersQuery query, global::System.Threading.CancellationToken ct = default)", src);
+        Assert.Contains("global::GetNumbersHandler", src);
+
+        var registrationSrc = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped<global::GetNumbersHandler>();", registrationSrc);
+    }
+
+    [Fact]
+    public void StreamHandler_NoValidHandleAsync_ReportsAD009()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+[StreamHandler]
+public sealed class BrokenStreamHandler
+{
+    public void HandleAsync(object query) { }
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD009");
+        Assert.DoesNotContain(sources.Keys, k => k == "AutoDispatch.Dispatcher.g.cs" && sources[k].Contains("StreamAsync"));
+    }
+
+    [Fact]
+    public void StreamHandler_DuplicateHandlersForSameQuery_ReportsAD010()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandlerA
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default) { yield return 1; }
+}
+
+[StreamHandler]
+public sealed class GetNumbersHandlerB
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default) { yield return 2; }
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD010");
+    }
+
+    [Fact]
+    public void StreamHandler_MissingCancellationToken_ReportsAD011()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query)
+    {
+        yield return 1;
+    }
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD011");
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("StreamAsync(global::GetNumbersQuery query, global::System.Threading.CancellationToken ct = default)", src);
+        Assert.Contains("HandleAsync(query);", src);
+    }
+
+    [Fact]
+    public async Task StreamHandler_Runtime_YieldsAllItemsInOrder()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        yield return 1;
+        yield return 2;
+        yield return 3;
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var results = await InvokeStreamAsync(compiled.Assembly, "GetNumbersQuery");
+
+        Assert.Equal(new[] { 1, 2, 3 }, results);
+    }
+
+    [Fact]
+    public async Task StreamHandler_Runtime_CoexistsWithCommandAndNotificationHandlers()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+public sealed class OrderCreated { }
+public sealed class GetNumbersQuery { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[NotificationHandler]
+public sealed class EmailHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        yield return 42;
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var sendResult = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+        var streamResults = await InvokeStreamAsync(compiled.Assembly, "GetNumbersQuery");
+
+        Assert.NotNull(sendResult);
+        Assert.Equal(new[] { 42 }, streamResults);
     }
 }

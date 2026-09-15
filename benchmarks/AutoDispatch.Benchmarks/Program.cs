@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using AutoDispatch;
 using AutoDispatch.Benchmarks;
 using BenchmarkDotNet.Attributes;
@@ -56,12 +57,46 @@ namespace AutoDispatch.Benchmarks
         public Task Handle(MediatRPingNotification notification, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
+    // ---- AutoDispatch streaming side ----
+    public sealed record PingStreamQuery(int Count);
+
+    [StreamHandler]
+    public sealed class PingStreamHandler
+    {
+        public async IAsyncEnumerable<int> HandleAsync(PingStreamQuery query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            for (var i = 0; i < query.Count; i++)
+            {
+                yield return i;
+            }
+
+            await Task.CompletedTask;
+        }
+    }
+
+    // ---- MediatR streaming side ----
+    public sealed record MediatRPingStreamQuery(int Count) : IStreamRequest<int>;
+
+    public sealed class MediatRPingStreamHandler : IStreamRequestHandler<MediatRPingStreamQuery, int>
+    {
+        public async IAsyncEnumerable<int> Handle(MediatRPingStreamQuery request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            for (var i = 0; i < request.Count; i++)
+            {
+                yield return i;
+            }
+
+            await Task.CompletedTask;
+        }
+    }
+
     /// <summary>
     /// Compares per-call dispatch overhead (time + allocations) between AutoDispatch's
     /// compile-time generated <see cref="IDispatcher"/> and MediatR's reflection-based
     /// <see cref="IMediator"/>, both resolving a trivial handler that adds one to an int.
     /// A second benchmark pair compares <c>PublishAsync</c>/<c>Publish</c> fanning a
-    /// notification out to two no-op handlers.
+    /// notification out to two no-op handlers. A third pair compares <c>StreamAsync</c>/
+    /// <c>CreateStream</c> fully enumerating a 10-item stream.
     /// </summary>
     [MemoryDiagnoser]
     public class DispatchBenchmarks
@@ -92,5 +127,21 @@ namespace AutoDispatch.Benchmarks
 
         [Benchmark]
         public Task MediatR_Publish() => _mediatr.Publish(new MediatRPingNotification(41));
+
+        [Benchmark]
+        public async Task AutoDispatch_StreamAsync()
+        {
+            await foreach (var _ in _autoDispatch.StreamAsync(new PingStreamQuery(10)))
+            {
+            }
+        }
+
+        [Benchmark]
+        public async Task MediatR_CreateStream()
+        {
+            await foreach (var _ in _mediatr.CreateStream(new MediatRPingStreamQuery(10)))
+            {
+            }
+        }
     }
 }

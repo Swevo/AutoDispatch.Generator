@@ -330,6 +330,52 @@ await dispatcher.PublishAsync(new OrderCreated(orderId), ct);
 - `[NotificationHandler(Lifetime = HandlerLifetime.Singleton)]` (or `Transient`) works the same way as it does on `[Handler]`
 - Pipeline `[Behavior]`s currently apply only to command/query dispatch (`Send`/`SendAsync`), not to `PublishAsync` — this may be added in a future release
 
+## Streaming queries
+
+MediatR's `IStreamRequest<TResponse>` has no zero-reflection equivalent in most alternatives —
+`[StreamHandler]` closes that gap. Mark a class `[StreamHandler]` with a public
+`IAsyncEnumerable<TResult> HandleAsync(TQuery query, CancellationToken ct = default)` method, and
+AutoDispatch generates a matching `StreamAsync` method on `IDispatcher` that returns the handler's
+async stream directly — no buffering, no intermediate list, items are produced lazily as your
+handler yields them.
+
+```csharp
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+
+public sealed record GetOrdersQuery(string CustomerId);
+public sealed record OrderSummary(string OrderId, decimal Total);
+
+[StreamHandler]
+public sealed class GetOrdersHandler
+{
+    public async IAsyncEnumerable<OrderSummary> HandleAsync(
+        GetOrdersQuery query,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await foreach (var order in _repository.StreamOrdersAsync(query.CustomerId, ct))
+        {
+            yield return new OrderSummary(order.Id, order.Total);
+        }
+    }
+}
+```
+
+```csharp
+await foreach (var summary in dispatcher.StreamAsync(new GetOrdersQuery(customerId), ct))
+{
+    // process each item as it arrives — no need to wait for the full result set
+}
+```
+
+### Conventions
+
+- Like `[Handler]`, streaming is request/response — **exactly one** `[StreamHandler]` is allowed per query type; a second handler for the same query type reports AD010, same spirit as AD002 for commands
+- Only `HandleAsync(TQuery query, CancellationToken ct = default)` returning `IAsyncEnumerable<TResult>` is recognized; methods returning `Task`/`Task<T>` belong on a `[Handler]`, not a `[StreamHandler]`
+- `AddAutoDispatch()` registers stream handlers the same way as command/notification handlers, honoring `[StreamHandler(Lifetime = ...)]`
+- Pipeline `[Behavior]`s do not apply to `StreamAsync` in this version — streams are a direct pass-through to the handler's `IAsyncEnumerable<T>`
+
 ## Diagnostics
 
 | Code | Severity | Description |
@@ -342,6 +388,9 @@ await dispatcher.PublishAsync(new OrderCreated(orderId), ct);
 | AD006 | Error | `[Behavior]` type does not expose a valid public `HandleAsync` method |
 | AD007 | Warning | `[NotificationHandler]` on a class with no valid `HandleAsync(TNotification, CancellationToken)` method |
 | AD008 | Warning | Notification `HandleAsync` does not accept `CancellationToken` |
+| AD009 | Warning | `[StreamHandler]` on a class with no valid `HandleAsync(TQuery, CancellationToken)` method returning `IAsyncEnumerable<TResult>` |
+| AD010 | Error | Duplicate stream handlers discovered for the same query type |
+| AD011 | Warning | Stream `HandleAsync` does not accept `CancellationToken` |
 
 ### AD001
 
@@ -391,6 +440,24 @@ Add a valid `HandleAsync(TNotification notification, CancellationToken ct = defa
 
 The method still works; the warning helps you preserve cancellation flow through `PublishAsync`.
 
+### AD009
+
+> `[StreamHandler]` on '{Type}' has no `HandleAsync(TQuery, CancellationToken)` method returning `IAsyncEnumerable<TResult>`. No streaming dispatch will be generated.`
+
+Add a valid `HandleAsync(TQuery query, CancellationToken ct = default)` method that returns `IAsyncEnumerable<TResult>`.
+
+### AD010
+
+> `Duplicate stream handler for query '{Query}': both '{HandlerA}' and '{HandlerB}' define a `HandleAsync` stream method for this query type. Remove one handler or rename the method.`
+
+Each query type must map to exactly one stream handler, just like commands.
+
+### AD011
+
+> `HandleAsync` on '{Handler}' for query '{Query}' is missing a `CancellationToken` parameter. Consider adding `CancellationToken ct = default` as the second parameter.`
+
+The method still works; the warning helps you preserve cancellation flow through `StreamAsync`.
+
 ## XML doc comments and pipeline readability
 
 Doc comments on `Handle`/`HandleAsync` methods are forwarded to the generated `IDispatcher` member automatically:
@@ -436,6 +503,8 @@ public Task<OrderId> SendAsync(CreateOrderCommand command, CancellationToken ct 
 | AD003 | Adds the missing `CancellationToken ct = default` parameter |
 | AD007 | Adds a `HandleAsync` stub method to a `[NotificationHandler]` class with none |
 | AD008 | Adds the missing `CancellationToken ct = default` parameter to a notification `HandleAsync` |
+| AD009 | Adds a `HandleAsync` stub method to a `[StreamHandler]` class with none |
+| AD011 | Adds the missing `CancellationToken ct = default` parameter to a stream `HandleAsync` |
 
 ## Testing handlers and behaviors
 
@@ -467,35 +536,40 @@ See the [AutoDispatch.Testing README](src/AutoDispatch.Testing/README.md) for mo
 dotnet new install AutoDispatch.Templates
 dotnet new autodispatch-handler -n CreateOrder --namespace MyApp.Orders
 dotnet new autodispatch-notification -n OrderCreated --namespace MyApp.Orders
+dotnet new autodispatch-stream -n GetOrders --namespace MyApp.Orders
 ```
 
 Generates a ready-to-fill `CreateOrderCommand.cs` with the command record and `[Handler]` class,
-or `OrderCreatedNotification.cs` with the notification record and `[NotificationHandler]` class.
+`OrderCreatedNotification.cs` with the notification record and `[NotificationHandler]` class, or
+`GetOrdersQuery.cs` with the query record and `[StreamHandler]` class.
 
 ## AutoDispatch vs alternatives
 
-| Approach | Boilerplate | Runtime dispatch | Pipeline behaviors | Compile-time safety | AOT |
-|---|---|---|---|---|---|
-| **AutoDispatch** | Low | None | Compile-time generated | High | ✅ |
-| **MediatR** | Medium | Yes | Runtime reflection | High | ⚠️ |
-| **Raw service calls** | Low | None | Manual | High | ✅ |
+| Approach | Boilerplate | Runtime dispatch | Pipeline behaviors | Notifications (publish) | Streaming queries | Compile-time safety | AOT |
+|---|---|---|---|---|---|---|---|
+| **AutoDispatch** | Low | None | Compile-time generated | ✅ (fan-out) | ✅ (`IAsyncEnumerable<T>`) | High | ✅ |
+| **MediatR** | Medium | Yes | Runtime reflection | ✅ | ✅ | High | ⚠️ |
+| **Raw service calls** | Low | None | Manual | Manual | Manual | High | ✅ |
 
 ### Benchmarks
 
 [BenchmarkDotNet results](benchmarks/AutoDispatch.Benchmarks/README.md) comparing the generated
-`IDispatcher` against MediatR's `IMediator`, for a single no-op command handler and for a
-notification fanned out to two no-op handlers:
+`IDispatcher` against MediatR's `IMediator`, for a single no-op command handler, a notification
+fanned out to two no-op handlers, and a 10-item stream fully enumerated:
 
 | Method                    | Mean      | Ratio | Allocated | Alloc Ratio |
 |-------------------------- |----------:|------:|----------:|------------:|
-| AutoDispatch_SendAsync    |  17.31 ns |  1.00 |      96 B |        1.00 |
-| MediatR_Send              |  68.59 ns |  3.96 |     288 B |        3.00 |
-| AutoDispatch_PublishAsync |  29.94 ns |  1.73 |      24 B |        0.25 |
-| MediatR_Publish           | 115.25 ns |  6.66 |     464 B |        4.83 |
+| AutoDispatch_SendAsync    |  16.36 ns |  1.00 |      96 B |        1.00 |
+| MediatR_Send              |  69.66 ns |  4.26 |     288 B |        3.00 |
+| AutoDispatch_PublishAsync |  30.13 ns |  1.84 |      24 B |        0.25 |
+| MediatR_Publish           | 106.47 ns |  6.51 |     464 B |        4.83 |
+| AutoDispatch_StreamAsync  | 172.46 ns | 10.54 |     144 B |        1.50 |
+| MediatR_CreateStream      | 435.03 ns | 26.60 |     536 B |        5.58 |
 
 **`SendAsync` is ~4x faster, 3x fewer allocations. `PublishAsync` fanning out to two handlers is
-~3.9x faster and allocates ~19x less** — no reflection-based handler lookup, no runtime-built
-pipeline or publisher. Run it yourself with `dotnet run -c Release` in
+~3.5x faster and allocates ~19x less. `StreamAsync` fully enumerating a 10-item stream is ~2.5x
+faster and allocates ~3.7x less** — no reflection-based handler lookup, no runtime-built
+pipeline, publisher, or stream wrapper. Run it yourself with `dotnet run -c Release` in
 `benchmarks/AutoDispatch.Benchmarks`.
 
 ## Migrating from MediatR

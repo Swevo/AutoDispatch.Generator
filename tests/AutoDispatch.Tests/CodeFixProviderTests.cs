@@ -207,4 +207,80 @@ public sealed class EmptyNotificationHandler
         Assert.Contains("HandleAsync", newText);
         Assert.Contains("NotImplementedException", newText);
     }
+
+    [Fact]
+    public async Task AD011_CodeFix_AddsCancellationTokenParameter()
+    {
+        var (document, _) = await CreateDocumentAsync(@"
+using AutoDispatch;
+using System.Collections.Generic;
+
+public sealed record GetNumbersQuery();
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query)
+    {
+        yield return 1;
+    }
+}");
+
+        var compilation = (await document.Project.GetCompilationAsync())!;
+        var driver = CSharpGeneratorDriver.Create(new AutoDispatchGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+        var ad011 = diagnostics.First(d => d.Id == "AD011");
+
+        var tree = await document.GetSyntaxTreeAsync();
+        var mappedDiagnostic = Diagnostic.Create(ad011.Descriptor, Location.Create(tree!, ad011.Location.SourceSpan));
+
+        var provider = new AddCancellationTokenCodeFixProvider();
+        CodeAction? registeredAction = null;
+        var context = new CodeFixContext(document, mappedDiagnostic, (action, _) => registeredAction = action, default);
+        await provider.RegisterCodeFixesAsync(context);
+
+        Assert.NotNull(registeredAction);
+        var operations = await registeredAction!.GetOperationsAsync(default);
+        var applyChanges = operations.OfType<ApplyChangesOperation>().Single();
+        var newDocument = applyChanges.ChangedSolution.GetDocument(document.Id)!;
+        var newText = (await newDocument.GetTextAsync()).ToString();
+
+        Assert.Contains("CancellationToken ct = default", newText);
+    }
+
+    [Fact]
+    public async Task AD009_CodeFix_AddsStreamHandleAsyncStub()
+    {
+        var (document, _) = await CreateDocumentAsync(@"
+using AutoDispatch;
+
+public sealed record GetNumbersQuery();
+
+[StreamHandler]
+public sealed class EmptyStreamHandler
+{
+}");
+
+        var compilation = (await document.Project.GetCompilationAsync())!;
+        var driver = CSharpGeneratorDriver.Create(new AutoDispatchGenerator());
+        driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
+        var ad009 = diagnostics.First(d => d.Id == "AD009");
+
+        var tree = await document.GetSyntaxTreeAsync();
+        var mappedDiagnostic = Diagnostic.Create(ad009.Descriptor, Location.Create(tree!, ad009.Location.SourceSpan));
+
+        var provider = new AddStreamHandleAsyncStubCodeFixProvider();
+        CodeAction? registeredAction = null;
+        var context = new CodeFixContext(document, mappedDiagnostic, (action, _) => registeredAction = action, default);
+        await provider.RegisterCodeFixesAsync(context);
+
+        Assert.NotNull(registeredAction);
+        var operations = await registeredAction!.GetOperationsAsync(default);
+        var applyChanges = operations.OfType<ApplyChangesOperation>().Single();
+        var newDocument = applyChanges.ChangedSolution.GetDocument(document.Id)!;
+        var newText = (await newDocument.GetTextAsync()).ToString();
+
+        Assert.Contains("IAsyncEnumerable<object> HandleAsync", newText);
+        Assert.Contains("NotImplementedException", newText);
+    }
 }

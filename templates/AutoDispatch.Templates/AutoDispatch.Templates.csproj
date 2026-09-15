@@ -3,12 +3,12 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <PackageType>Template</PackageType>
     <PackageId>AutoDispatch.Templates</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Title>AutoDispatch.Generator item templates</Title>
     <Authors>Justin Bannister</Authors>
     <Copyright>Copyright (c) 2026 Justin Bannister</Copyright>
-    <Description>dotnet new item templates for AutoDispatch.Generator: scaffold a command + [Handler] pair (`autodispatch-handler`) or a notification + [NotificationHandler] pair (`autodispatch-notification`). Install with `dotnet new install AutoDispatch.Templates`.</Description>
-    <PackageTags>cqrs;mediator;dispatcher;dotnet-new;template;source-generator;dotnet;csharp;notifications;pubsub</PackageTags>
+    <Description>dotnet new item templates for AutoDispatch.Generator: scaffold a command + [Handler] pair (`autodispatch-handler`), a notification + [NotificationHandler] pair (`autodispatch-notification`), or a streaming query + [StreamHandler] pair (`autodispatch-stream`). Install with `dotnet new install AutoDispatch.Templates`.</Description>
+    <PackageTags>cqrs;mediator;dispatcher;dotnet-new;template;source-generator;dotnet;csharp;notifications;pubsub;streaming;iasyncenumerable</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>

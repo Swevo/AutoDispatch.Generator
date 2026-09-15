@@ -1,14 +1,23 @@
 # Changelog
 
-## [Unreleased]
+## [1.7.0] - 2026-09-16
 
 ### Added
-- **Publish benchmark** — `AutoDispatch.Benchmarks` now also compares `PublishAsync`/`Publish` fanning a notification out to two no-op handlers: AutoDispatch is ~3.9x faster than MediatR and allocates ~19x less (24 B vs 464 B) for the same two-handler fan-out. README and benchmark results updated with real numbers.
-- **`autodispatch-notification` item template** — `AutoDispatch.Templates` (bumped to 1.1.0) now scaffolds a notification record + `[NotificationHandler]` class via `dotnet new autodispatch-notification -n OrderCreated`, matching the existing `autodispatch-handler` template for commands
+- **Streaming queries** — the second-biggest gap versus MediatR is closed. Mark a class `[StreamHandler]` with an `IAsyncEnumerable<TResult> HandleAsync(TQuery query, CancellationToken ct = default)` method, and AutoDispatch generates a `StreamAsync(TQuery, CancellationToken) : IAsyncEnumerable<TResult>` method on `IDispatcher` that delegates directly to the handler — no buffering, no wrapping enumerator
+- Like `[Handler]` commands (and unlike notifications), exactly one `[StreamHandler]` may exist per query type
+- `AddAutoDispatch()` now also registers `[StreamHandler]` classes with their configured `HandlerLifetime` (defaults to `Scoped`, same as commands and notifications)
+- AD009 (Warning): `[StreamHandler]` on a class with no valid `HandleAsync(TQuery, CancellationToken) : IAsyncEnumerable<TResult>` method
+- AD010 (Error): more than one `[StreamHandler]` registered for the same query type
+- AD011 (Warning): stream `HandleAsync` is missing a `CancellationToken` parameter
+- **IDE code fixes for streams** — `AddCancellationTokenCodeFixProvider` now also fixes AD011, and a new `AddStreamHandleAsyncStubCodeFixProvider` fixes AD009 by adding an `IAsyncEnumerable<object>`-returning `HandleAsync` stub
+- **`autodispatch-stream` item template** — `AutoDispatch.Templates` (bumped to 1.2.0) now scaffolds a query record + `[StreamHandler]` class via `dotnet new autodispatch-stream -n GetOrders`, matching the existing `autodispatch-handler`/`autodispatch-notification` templates
+- **Streaming benchmark** — `AutoDispatch.Benchmarks` now also compares `StreamAsync`/`CreateStream` fully enumerating a 10-item stream: AutoDispatch is ~2.5x faster than MediatR and allocates ~3.7x less (144 B vs 536 B). README and benchmark results updated with real numbers
 
 ## [1.6.1] - 2026-09-15
 
 ### Added
+- **Publish benchmark** — `AutoDispatch.Benchmarks` now also compares `PublishAsync`/`Publish` fanning a notification out to two no-op handlers: AutoDispatch is ~3.5x faster than MediatR and allocates ~19x less (24 B vs 464 B) for the same two-handler fan-out. README and benchmark results updated with real numbers.
+- **`autodispatch-notification` item template** — `AutoDispatch.Templates` (bumped to 1.1.0) now scaffolds a notification record + `[NotificationHandler]` class via `dotnet new autodispatch-notification -n OrderCreated`, matching the existing `autodispatch-handler` template for commands
 - **IDE code fixes for notifications** — `AutoDispatch.CodeFixes` now also fixes AD007 (adds a `HandleAsync` stub to a `[NotificationHandler]` class with none) and AD008 (adds the missing `CancellationToken ct = default` parameter), matching the existing AD001/AD003 quick fixes for commands
 
 ## [1.6.0] - 2026-09-15
