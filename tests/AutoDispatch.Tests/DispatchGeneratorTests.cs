@@ -1378,6 +1378,155 @@ public sealed class EmailHandler
         Assert.NotNull(result);
     }
 
+    [Fact]
+    public void ParallelPublishAttribute_GeneratedInAttributesFile()
+    {
+        var sources = RunGenerator("using AutoDispatch;", out _);
+        var src = sources["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("ParallelPublishAttribute", src);
+    }
+
+    [Fact]
+    public void ParallelPublish_NotificationType_GeneratesTaskWhenAll()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[ParallelPublish]
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class EmailHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+[NotificationHandler]
+public sealed class AnalyticsHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("Task.WhenAll(", src);
+        Assert.Contains("Publish fan-out (parallel via Task.WhenAll)", src);
+    }
+
+    [Fact]
+    public void NoParallelPublish_NotificationType_GeneratesSequentialAwaits()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class EmailHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.DoesNotContain("Task.WhenAll(", src);
+        Assert.Contains("Publish fan-out (sequential)", src);
+    }
+
+    [Fact]
+    public async Task ParallelPublish_Runtime_AllHandlersRunAndComplete()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+[ParallelPublish]
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class EmailHandler
+{
+    public async Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        await Task.Delay(10, ct);
+        lock (Recorder.Entries) { Recorder.Entries.Add(""email""); }
+    }
+}
+
+[NotificationHandler]
+public sealed class AnalyticsHandler
+{
+    public async Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        await Task.Delay(1, ct);
+        lock (Recorder.Entries) { Recorder.Entries.Add(""analytics""); }
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+
+        var entries = GetRecorderEntries(compiled.Assembly);
+        Assert.Equal(2, entries.Count);
+        Assert.Contains("email", entries);
+        Assert.Contains("analytics", entries);
+    }
+
+    [Fact]
+    public async Task ParallelPublish_Runtime_AllHandlersRunEvenIfOneThrows()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+[ParallelPublish]
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class FailingHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        lock (Recorder.Entries) { Recorder.Entries.Add(""failing""); }
+        throw new System.InvalidOperationException(""boom"");
+    }
+}
+
+[NotificationHandler]
+public sealed class AnalyticsHandler
+{
+    public async Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        await Task.Delay(1, ct);
+        lock (Recorder.Entries) { Recorder.Entries.Add(""analytics""); }
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await Assert.ThrowsAsync<System.InvalidOperationException>(
+            () => InvokePublishAsync(compiled.Assembly, "OrderCreated"));
+
+        var entries = GetRecorderEntries(compiled.Assembly);
+        Assert.Contains("failing", entries);
+        Assert.Contains("analytics", entries);
+    }
+
     // ---- Streaming queries ----
 
     [Fact]

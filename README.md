@@ -13,6 +13,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Same mental model as MediatR** — command/query + handler + dispatcher
 - **Zero reflection** — direct generated calls, no runtime dispatch overhead
 - **Pipeline behaviors** — `[Behavior(Order = N)]` wraps all async handlers at compile time, and `[StreamBehavior(Order = N)]` wraps streaming queries the same way; no `IPipelineBehavior<,>` magic at runtime
+- **Configurable notification fan-out** — `PublishAsync` runs handlers sequentially by default, or mark a notification `[ParallelPublish]` for `Task.WhenAll` concurrency
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -326,9 +327,39 @@ await dispatcher.PublishAsync(new OrderCreated(orderId), ct);
 
 - Only `HandleAsync(TNotification notification, CancellationToken ct = default)` is supported — notification handlers publish, they don't return a result, so plain `Handle` and `Task<T>`-returning methods are ignored
 - Unlike `[Handler]`, **multiple** `[NotificationHandler]` classes may handle the same notification type — there is no AD002-style "duplicate handler" error
-- Handlers run sequentially, in deterministic order (by handler type name), awaiting each one before starting the next — matching MediatR's default `ForeachAwaitPublisher` behavior. If a handler throws, remaining handlers for that publish call do not run
+- By default, handlers run **sequentially**, in deterministic order (by handler type name), awaiting each one before starting the next — matching MediatR's default `ForeachAwaitPublisher` behavior. If a handler throws, remaining handlers for that publish call do not run
+- Mark the **notification type itself** `[ParallelPublish]` to switch that notification to **concurrent** fan-out via `Task.WhenAll` instead — matching MediatR's opt-in `TaskWhenAllPublisher`. All handlers start immediately and are awaited together; every handler runs even if another one throws (a synchronous throw is safely converted to a faulted task so it doesn't skip the rest), and failures surface once every handler has finished
 - `[NotificationHandler(Lifetime = HandlerLifetime.Singleton)]` (or `Transient`) works the same way as it does on `[Handler]`
 - Pipeline `[Behavior]`s currently apply only to command/query dispatch (`Send`/`SendAsync`), not to `PublishAsync` — this may be added in a future release
+
+### Parallel publish
+
+Only opt in when handlers for a notification are independent of one another and safe to run
+concurrently (no shared mutable state, no ordering assumptions between handlers):
+
+```csharp
+using AutoDispatch;
+
+[ParallelPublish]
+public sealed record OrderCreated(Guid OrderId);
+
+[NotificationHandler]
+public sealed class SendConfirmationEmail
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => /* ... */ Task.CompletedTask;
+}
+
+[NotificationHandler]
+public sealed class UpdateAnalytics
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => /* ... */ Task.CompletedTask;
+}
+```
+
+```csharp
+// SendConfirmationEmail and UpdateAnalytics now both start immediately and run concurrently
+await dispatcher.PublishAsync(new OrderCreated(orderId), ct);
+```
 
 ## Streaming queries
 
@@ -604,7 +635,7 @@ Generates a ready-to-fill `CreateOrderCommand.cs` with the command record and `[
 
 | Approach | Boilerplate | Runtime dispatch | Pipeline behaviors | Notifications (publish) | Streaming queries | Compile-time safety | AOT |
 |---|---|---|---|---|---|---|---|
-| **AutoDispatch** | Low | None | Compile-time generated | ✅ (fan-out) | ✅ (`IAsyncEnumerable<T>` + pipeline) | High | ✅ |
+| **AutoDispatch** | Low | None | Compile-time generated | ✅ (fan-out, sequential or `[ParallelPublish]`) | ✅ (`IAsyncEnumerable<T>` + pipeline) | High | ✅ |
 | **MediatR** | Medium | Yes | Runtime reflection | ✅ | ✅ | High | ⚠️ |
 | **Raw service calls** | Low | None | Manual | Manual | Manual | High | ✅ |
 

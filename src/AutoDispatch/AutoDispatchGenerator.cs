@@ -79,6 +79,19 @@ namespace AutoDispatch
     }
 
     /// <summary>
+    /// Apply to a notification type (not the handler) to fan a <c>PublishAsync</c> call out to
+    /// every registered handler concurrently via <c>Task.WhenAll</c>, instead of the default
+    /// sequential <c>await</c>-one-at-a-time order. Only use this when handlers for the
+    /// notification are independent of one another and safe to run concurrently — unlike the
+    /// sequential default, a handler throwing does not stop the others from running, and multiple
+    /// handlers may throw (surfaced as an <see cref=""System.AggregateException""/>).
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = false, Inherited = false)]
+    public sealed class ParallelPublishAttribute : Attribute
+    {
+    }
+
+    /// <summary>
     /// Marks a class as a streaming query handler. Declare a public
     /// <c>IAsyncEnumerable&lt;TResult&gt; HandleAsync(TQuery query, CancellationToken ct = default)</c>
     /// method — AutoDispatch generates a matching <c>StreamAsync</c> method on <c>IDispatcher</c>
@@ -120,6 +133,27 @@ namespace AutoDispatch
             TQuery query,
             System.Func<System.Collections.Generic.IAsyncEnumerable<TResult>> next,
             System.Threading.CancellationToken ct = default);
+    }
+
+    /// <summary>
+    /// Helper used by generated <c>[ParallelPublish]</c> notification dispatch. Invokes a handler
+    /// call eagerly and converts a *synchronous* throw (before any <see cref=""System.Threading.Tasks.Task""/>
+    /// is returned) into a faulted task, so <see cref=""System.Threading.Tasks.Task.WhenAll(System.Threading.Tasks.Task[])""/>
+    /// still waits for every other handler to run instead of the exception escaping immediately.
+    /// </summary>
+    public static class PublishTaskHelpers
+    {
+        public static System.Threading.Tasks.Task SafeInvoke(System.Func<System.Threading.Tasks.Task> invoke)
+        {
+            try
+            {
+                return invoke();
+            }
+            catch (System.Exception ex)
+            {
+                return System.Threading.Tasks.Task.FromException(ex);
+            }
+        }
     }
 }
 ";
@@ -414,6 +448,8 @@ namespace AutoDispatch
             HandlerTypeFqn = handler.HandlerTypeFqn,
             HandlerDisplayName = handler.HandlerDisplayName,
             HasCancellationTokenParameter = method.Parameters.Length == 2,
+            ParallelPublish = method.Parameters[0].Type.GetAttributes().Any(static a =>
+                a.AttributeClass?.ToDisplayString() == "AutoDispatch.ParallelPublishAttribute"),
             Location = method.Locations.FirstOrDefault() ?? handler.Location,
             DocCommentXml = GetDocCommentXml(method)
         });
@@ -752,7 +788,8 @@ namespace AutoDispatch
                 .GroupBy(static method => method.NotificationTypeFqn, StringComparer.Ordinal)
                 .Select(static group => new NotificationGroup(
                     group.Key,
-                    group.OrderBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal).ToArray()))
+                    group.OrderBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal).ToArray(),
+                    group.Any(static method => method.ParallelPublish)))
                 .OrderBy(static group => group.NotificationTypeFqn, StringComparer.Ordinal)
                 .ToArray();
         }
@@ -981,29 +1018,63 @@ namespace AutoDispatch
 
         foreach (var group in notificationGroups)
         {
-            // Fan-out publish: every registered handler for this notification type runs in
-            // deterministic (handler-type-name) order. A handler throwing stops the remaining
-            // handlers from running, matching MediatR's default ForeachAwaitPublisher behavior.
             var handlerNames = string.Join(", ", group.Methods.Select(static m => GetShortTypeName(m.HandlerTypeFqn)));
-            sb.AppendLine($"        // Publish fan-out: {handlerNames}");
-            sb.AppendLine($"        public async global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
-            sb.AppendLine("        {");
 
-            foreach (var method in group.Methods)
+            if (!group.ParallelPublish)
             {
-                sb.Append("            await this._sp.GetRequiredService<");
-                sb.Append(method.HandlerTypeFqn);
-                sb.Append(">().HandleAsync(notification");
-                if (method.HasCancellationTokenParameter)
+                // Fan-out publish: every registered handler for this notification type runs in
+                // deterministic (handler-type-name) order. A handler throwing stops the remaining
+                // handlers from running, matching MediatR's default ForeachAwaitPublisher behavior.
+                sb.AppendLine($"        // Publish fan-out (sequential): {handlerNames}");
+                sb.AppendLine($"        public async global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
+                sb.AppendLine("        {");
+
+                foreach (var method in group.Methods)
                 {
-                    sb.Append(", ct");
+                    sb.Append("            await this._sp.GetRequiredService<");
+                    sb.Append(method.HandlerTypeFqn);
+                    sb.Append(">().HandleAsync(notification");
+                    if (method.HasCancellationTokenParameter)
+                    {
+                        sb.Append(", ct");
+                    }
+
+                    sb.AppendLine(").ConfigureAwait(false);");
                 }
 
-                sb.AppendLine(").ConfigureAwait(false);");
+                sb.AppendLine("        }");
+                sb.AppendLine();
             }
+            else
+            {
+                // [ParallelPublish] fan-out: every registered handler for this notification type
+                // is started immediately (via PublishTaskHelpers.SafeInvoke, which converts a
+                // synchronous throw into a faulted task) and awaited together via Task.WhenAll,
+                // matching MediatR's TaskWhenAllPublisher. All handlers run even if one throws;
+                // failures surface as the first exception (or an AggregateException if more than
+                // one handler faults and the caller inspects it directly).
+                sb.AppendLine($"        // Publish fan-out (parallel via Task.WhenAll): {handlerNames}");
+                sb.AppendLine($"        public global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
+                sb.AppendLine("            => global::System.Threading.Tasks.Task.WhenAll(");
 
-            sb.AppendLine("        }");
-            sb.AppendLine();
+                for (var i = 0; i < group.Methods.Count; i++)
+                {
+                    var method = group.Methods[i];
+                    sb.Append("                global::AutoDispatch.PublishTaskHelpers.SafeInvoke(() => this._sp.GetRequiredService<");
+                    sb.Append(method.HandlerTypeFqn);
+                    sb.Append(">().HandleAsync(notification");
+                    if (method.HasCancellationTokenParameter)
+                    {
+                        sb.Append(", ct");
+                    }
+
+                    sb.Append(')');
+                    sb.Append(')');
+                    sb.AppendLine(i < group.Methods.Count - 1 ? "," : ");");
+                }
+
+                sb.AppendLine();
+            }
         }
 
         foreach (var method in streamMethods)
@@ -1564,6 +1635,8 @@ namespace AutoDispatch
 
         public bool HasCancellationTokenParameter { get; set; }
 
+        public bool ParallelPublish { get; set; }
+
         public Location Location { get; set; } = Location.None;
 
         public string? DocCommentXml { get; set; }
@@ -1573,15 +1646,20 @@ namespace AutoDispatch
     /// order AutoDispatch will invoke them from the generated `PublishAsync` method.</summary>
     private sealed class NotificationGroup
     {
-        public NotificationGroup(string notificationTypeFqn, IReadOnlyList<NotificationMethodInfo> methods)
+        public NotificationGroup(string notificationTypeFqn, IReadOnlyList<NotificationMethodInfo> methods, bool parallelPublish)
         {
             NotificationTypeFqn = notificationTypeFqn;
             Methods = methods;
+            ParallelPublish = parallelPublish;
         }
 
         public string NotificationTypeFqn { get; }
 
         public IReadOnlyList<NotificationMethodInfo> Methods { get; }
+
+        /// <summary>True when the notification type is marked <c>[ParallelPublish]</c> — handlers
+        /// run concurrently via <c>Task.WhenAll</c> instead of sequentially.</summary>
+        public bool ParallelPublish { get; }
     }
 
     private sealed class StreamHandlerInfo

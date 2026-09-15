@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0] - 2026-09-16
+
+### Added
+- **Configurable notification publish strategy** — matching MediatR's `INotificationPublisher` options. Mark a notification type `[ParallelPublish]` to fan `PublishAsync` out to all of its handlers concurrently via `Task.WhenAll` instead of the sequential default (matching MediatR's `TaskWhenAllPublisher`); every handler runs even if another one throws, including handlers that throw synchronously (converted to a faulted task via the new internal `PublishTaskHelpers.SafeInvoke` so a sync throw can't skip the remaining handlers)
+- Notifications without `[ParallelPublish]` are unaffected — codegen is unchanged, still the deterministic sequential `await`-one-at-a-time order from 1.6.0
+- README: new "Parallel publish" subsection under Notifications, updated feature bullets and comparison table
+- 6 new tests (codegen for both strategies, DI-free attribute discovery, runtime concurrency, and the synchronous-throw safety guarantee); 85/85 passing solution-wide
+
 ## [1.8.0] - 2026-09-16
 
 ### Added
