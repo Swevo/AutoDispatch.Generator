@@ -4,5 +4,6 @@
   <Project Path="src/AutoDispatch.Testing/AutoDispatch.Testing.csproj" />
   <Project Path="templates/AutoDispatch.Templates/AutoDispatch.Templates.csproj" />
   <Project Path="benchmarks/AutoDispatch.Benchmarks/AutoDispatch.Benchmarks.csproj" />
+  <Project Path="benchmarks/AutoDispatch.Benchmarks.Pipeline/AutoDispatch.Benchmarks.Pipeline.csproj" />
   <Project Path="tests/AutoDispatch.Tests/AutoDispatch.Tests.csproj" />
 </Solution>

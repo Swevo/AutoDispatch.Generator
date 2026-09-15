@@ -794,6 +794,18 @@ faster and allocates ~3.7x less** — no reflection-based handler lookup, no run
 pipeline, publisher, or stream wrapper. Run it yourself with `dotnet run -c Release` in
 `benchmarks/AutoDispatch.Benchmarks`.
 
+[A separate benchmark](benchmarks/AutoDispatch.Benchmarks.Pipeline/README.md) measures a
+**full pipeline** — two behaviors plus a pre-processor and a post-processor wrapping the
+handler — instead of a bare no-op dispatch:
+
+| Method                              | Mean     | Ratio | Allocated | Alloc Ratio |
+|------------------------------------- |---------:|------:|----------:|------------:|
+| AutoDispatch_SendAsync_FullPipeline  | 173.9 ns |  1.00 |     432 B |        1.00 |
+| MediatR_Send_FullPipeline            | 313.9 ns |  1.81 |    1280 B |        2.96 |
+
+**Even fully wired up with behaviors and pre/post-processors on both sides, AutoDispatch is
+still ~1.8x faster and allocates ~3x less than MediatR's equivalent runtime pipeline.**
+
 ## Migrating from MediatR
 
 AutoDispatch follows the same CQRS mental model as MediatR, so migration is mechanical:
