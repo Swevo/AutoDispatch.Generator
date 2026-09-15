@@ -233,6 +233,49 @@ namespace AutoDispatch
             TException exception,
             System.Threading.CancellationToken ct = default);
     }
+
+    /// <summary>
+    /// Marks a class as a request pre-processor — runs immediately before a command/query handler
+    /// is invoked, regardless of any registered <c>[Behavior]</c>s. Useful for validation, logging,
+    /// or auditing that should happen unconditionally right before the handler executes. Declare a
+    /// public, open generic class with exactly one type parameter (<c>TCommand</c>) implementing
+    /// <see cref=""IPreProcessor{TCommand}""/>. Matches MediatR's <c>IRequestPreProcessor&lt;TRequest&gt;</c>.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class PreProcessorAttribute : Attribute
+    {
+        public int Order { get; set; } = 0;
+    }
+
+    public interface IPreProcessor<TCommand>
+    {
+        System.Threading.Tasks.Task ProcessAsync(
+            TCommand command,
+            System.Threading.CancellationToken ct = default);
+    }
+
+    /// <summary>
+    /// Marks a class as a request post-processor — runs immediately after a command/query handler
+    /// returns successfully (before control returns to any registered <c>[Behavior]</c>s), and is
+    /// given the handler's response. Useful for logging, auditing, or response enrichment that
+    /// should happen unconditionally right after the handler executes. Declare a public, open
+    /// generic class with exactly two type parameters (<c>TCommand</c>, <c>TResult</c>)
+    /// implementing <see cref=""IPostProcessor{TCommand, TResult}""/>. Matches MediatR's
+    /// <c>IRequestPostProcessor&lt;TRequest, TResponse&gt;</c>.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class PostProcessorAttribute : Attribute
+    {
+        public int Order { get; set; } = 0;
+    }
+
+    public interface IPostProcessor<TCommand, TResult>
+    {
+        System.Threading.Tasks.Task ProcessAsync(
+            TCommand command,
+            TResult response,
+            System.Threading.CancellationToken ct = default);
+    }
 }
 ";
 
@@ -396,6 +439,54 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD021 = new(
+        id: "AD021",
+        title: "Pre-processor must be an open generic class",
+        messageFormat: "[PreProcessor] on '{0}' must be a public, non-abstract class with exactly one type parameter so AutoDispatch can close it as `<TCommand>`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD022 = new(
+        id: "AD022",
+        title: "Pre-processor must implement IPreProcessor",
+        messageFormat: "[PreProcessor] on '{0}' must implement `AutoDispatch.IPreProcessor<TCommand>` using its declared type parameter",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD023 = new(
+        id: "AD023",
+        title: "Pre-processor has an invalid ProcessAsync signature",
+        messageFormat: "[PreProcessor] on '{0}' must declare `public Task ProcessAsync(TCommand command, CancellationToken ct = default)`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD024 = new(
+        id: "AD024",
+        title: "Post-processor must be an open generic class",
+        messageFormat: "[PostProcessor] on '{0}' must be a public, non-abstract class with exactly two type parameters so AutoDispatch can close it as `<TCommand, TResult>`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD025 = new(
+        id: "AD025",
+        title: "Post-processor must implement IPostProcessor",
+        messageFormat: "[PostProcessor] on '{0}' must implement `AutoDispatch.IPostProcessor<TCommand, TResult>` using its declared type parameters",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD026 = new(
+        id: "AD026",
+        title: "Post-processor has an invalid ProcessAsync signature",
+        messageFormat: "[PostProcessor] on '{0}' must declare `public Task ProcessAsync(TCommand command, TResult response, CancellationToken ct = default)`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -466,14 +557,35 @@ namespace AutoDispatch
 
         var exceptionMiddleware = exceptionHandlers.Combine(exceptionActions);
 
-        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware);
+        var preProcessors = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.PreProcessorAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax,
+                transform: static (ctx, ct) => TransformPreProcessor(ctx, ct))
+            .Where(static b => b is not null)
+            .Select(static (b, _) => b!)
+            .Collect();
+
+        var postProcessors = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.PostProcessorAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax,
+                transform: static (ctx, ct) => TransformPostProcessor(ctx, ct))
+            .Where(static b => b is not null)
+            .Select(static (b, _) => b!)
+            .Collect();
+
+        var processors = preProcessors.Combine(postProcessors);
+
+        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var (((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList), exceptionMiddlewareTuple) = tuple;
+            var ((((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple) = tuple;
             var ((h1, h2), h3) = handlersTuple;
             var (exceptionHandlerList, exceptionActionList) = exceptionMiddlewareTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList);
+            var (preProcessorList, postProcessorList) = processorsTuple;
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList);
         });
     }
 
@@ -791,7 +903,9 @@ namespace AutoDispatch
         ImmutableArray<StreamHandlerInfo> streamHandlers,
         ImmutableArray<StreamBehaviorCandidate> streamBehaviorCandidates,
         ImmutableArray<ExceptionHandlerCandidate> exceptionHandlerCandidates,
-        ImmutableArray<ExceptionActionCandidate> exceptionActionCandidates)
+        ImmutableArray<ExceptionActionCandidate> exceptionActionCandidates,
+        ImmutableArray<PreProcessorCandidate> preProcessorCandidates,
+        ImmutableArray<PostProcessorCandidate> postProcessorCandidates)
     {
         var behaviors = new List<BehaviorInfo>();
         var seenBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -842,6 +956,40 @@ namespace AutoDispatch
             }
 
             exceptionActions.Add(candidate.ExceptionAction);
+        }
+
+        var preProcessors = new List<PreProcessorInfo>();
+        var seenPreProcessorTypes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in preProcessorCandidates)
+        {
+            foreach (var diagnostic in candidate.Diagnostics)
+            {
+                context.ReportDiagnostic(diagnostic);
+            }
+
+            if (candidate.PreProcessor is null || !seenPreProcessorTypes.Add(candidate.PreProcessor.UnboundTypeFqn))
+            {
+                continue;
+            }
+
+            preProcessors.Add(candidate.PreProcessor);
+        }
+
+        var postProcessors = new List<PostProcessorInfo>();
+        var seenPostProcessorTypes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in postProcessorCandidates)
+        {
+            foreach (var diagnostic in candidate.Diagnostics)
+            {
+                context.ReportDiagnostic(diagnostic);
+            }
+
+            if (candidate.PostProcessor is null || !seenPostProcessorTypes.Add(candidate.PostProcessor.UnboundTypeFqn))
+            {
+                continue;
+            }
+
+            postProcessors.Add(candidate.PostProcessor);
         }
 
         var streamBehaviors = new List<StreamBehaviorInfo>();
@@ -1049,11 +1197,11 @@ namespace AutoDispatch
             return;
         }
 
-        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions));
-        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, streamBehaviors, exceptionHandlers, exceptionActions));
+        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors));
+        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors));
     }
 
-    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions)
+    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors)
     {
         var sortedBehaviors = behaviors
             .OrderBy(static b => b.Order)
@@ -1104,6 +1252,22 @@ namespace AutoDispatch
             .ThenBy(static g => g.ExceptionTypeFqn, StringComparer.Ordinal)
             .ToArray();
         var hasExceptionHandlers = exceptionMiddlewareGroups.Length > 0;
+
+        var sortedPreProcessors = preProcessors
+            .OrderBy(static p => p.Order)
+            .ThenBy(static p => p.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static p => p.SortSpanStart)
+            .ThenBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+        var hasPreProcessors = sortedPreProcessors.Length > 0;
+
+        var sortedPostProcessors = postProcessors
+            .OrderBy(static p => p.Order)
+            .ThenBy(static p => p.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static p => p.SortSpanStart)
+            .ThenBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+        var hasPostProcessors = sortedPostProcessors.Length > 0;
 
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -1164,9 +1328,9 @@ namespace AutoDispatch
 
         foreach (var method in methods)
         {
-            if (!method.IsAsync || (!hasBehaviors && !hasExceptionHandlers))
+            if (!method.IsAsync || (!hasBehaviors && !hasExceptionHandlers && !hasPreProcessors && !hasPostProcessors))
             {
-                // Simple expression-body form (sync, or async with no behaviors/exception handlers)
+                // Simple expression-body form (sync, or async with no behaviors/exception handlers/processors)
                 AppendDocComment(sb, method.DocCommentXml, "        ");
                 sb.Append("        public ");
                 sb.Append(GetInterfaceReturnType(method));
@@ -1196,7 +1360,7 @@ namespace AutoDispatch
             }
             else
             {
-                // Async with pipeline and/or exception handlers
+                // Async with pipeline, exception handlers, and/or pre/post-processors
                 var resultFqn = method.AsyncResultTypeFqn ?? "global::AutoDispatch.Unit";
                 var pipelineType = $"global::System.Func<global::System.Threading.Tasks.Task<{resultFqn}>>";
 
@@ -1205,7 +1369,15 @@ namespace AutoDispatch
                 // Pipeline execution order, outermost-first, to make the generated chain easy to reason about.
                 var handlerShortName = GetShortTypeName(method.HandlerTypeFqn);
                 var pipelineOrder = string.Join(" -> ", sortedBehaviors.Select(static b => GetShortTypeName(b.UnboundTypeFqn)));
-                sb.AppendLine($"        // Pipeline: {pipelineOrder} -> {handlerShortName}.{method.MethodName} -> {pipelineOrder}");
+                var innerStep = handlerShortName + "." + method.MethodName;
+                if (hasPreProcessors || hasPostProcessors)
+                {
+                    var preOrder = string.Join(", ", sortedPreProcessors.Select(static p => GetShortTypeName(p.UnboundTypeFqn)));
+                    var postOrder = string.Join(", ", sortedPostProcessors.Select(static p => GetShortTypeName(p.UnboundTypeFqn)));
+                    innerStep = $"[{preOrder}] -> {innerStep} -> [{postOrder}]";
+                }
+
+                sb.AppendLine($"        // Pipeline: {pipelineOrder} -> {innerStep} -> {pipelineOrder}");
                 if (hasExceptionHandlers)
                 {
                     var exceptionOrder = string.Join(", ", exceptionMiddlewareGroups.Select(static g => GetShortTypeName(g.ExceptionTypeFqn)));
@@ -1223,11 +1395,51 @@ namespace AutoDispatch
 
                 if (method.AsyncResultTypeFqn != null)
                 {
-                    sb.AppendLine($"            {pipelineType} pipeline = () => this._sp.GetRequiredService<{method.HandlerTypeFqn}>().{method.MethodName}(command{(method.HasCancellationTokenParameter ? ", ct" : "")});");
+                    if (!hasPreProcessors && !hasPostProcessors)
+                    {
+                        sb.AppendLine($"            {pipelineType} pipeline = () => this._sp.GetRequiredService<{method.HandlerTypeFqn}>().{method.MethodName}(command{(method.HasCancellationTokenParameter ? ", ct" : "")});");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"            {pipelineType} pipeline = async () =>");
+                        sb.AppendLine("            {");
+                        foreach (var p in sortedPreProcessors)
+                        {
+                            var preTypeFqn = p.UnboundTypeFqn.Replace("<>", $"<{method.CommandTypeFqn}>");
+                            sb.AppendLine($"                await this._sp.GetRequiredService<{preTypeFqn}>().ProcessAsync(command, ct).ConfigureAwait(false);");
+                        }
+
+                        sb.AppendLine($"                var _result = await this._sp.GetRequiredService<{method.HandlerTypeFqn}>().{method.MethodName}(command{(method.HasCancellationTokenParameter ? ", ct" : "")}).ConfigureAwait(false);");
+                        foreach (var p in sortedPostProcessors)
+                        {
+                            var postTypeFqn = p.UnboundTypeFqn.Replace("<,>", $"<{method.CommandTypeFqn}, {resultFqn}>");
+                            sb.AppendLine($"                await this._sp.GetRequiredService<{postTypeFqn}>().ProcessAsync(command, _result, ct).ConfigureAwait(false);");
+                        }
+
+                        sb.AppendLine("                return _result;");
+                        sb.AppendLine("            };");
+                    }
                 }
                 else
                 {
-                    sb.AppendLine($"            {pipelineType} pipeline = async () => {{ await this._sp.GetRequiredService<{method.HandlerTypeFqn}>().{method.MethodName}(command{(method.HasCancellationTokenParameter ? ", ct" : "")}); return global::AutoDispatch.Unit.Value; }};");
+                    sb.AppendLine($"            {pipelineType} pipeline = async () =>");
+                    sb.AppendLine("            {");
+                    foreach (var p in sortedPreProcessors)
+                    {
+                        var preTypeFqn = p.UnboundTypeFqn.Replace("<>", $"<{method.CommandTypeFqn}>");
+                        sb.AppendLine($"                await this._sp.GetRequiredService<{preTypeFqn}>().ProcessAsync(command, ct).ConfigureAwait(false);");
+                    }
+
+                    sb.AppendLine($"                await this._sp.GetRequiredService<{method.HandlerTypeFqn}>().{method.MethodName}(command{(method.HasCancellationTokenParameter ? ", ct" : "")}).ConfigureAwait(false);");
+                    sb.AppendLine("                var _result = global::AutoDispatch.Unit.Value;");
+                    foreach (var p in sortedPostProcessors)
+                    {
+                        var postTypeFqn = p.UnboundTypeFqn.Replace("<,>", $"<{method.CommandTypeFqn}, {resultFqn}>");
+                        sb.AppendLine($"                await this._sp.GetRequiredService<{postTypeFqn}>().ProcessAsync(command, _result, ct).ConfigureAwait(false);");
+                    }
+
+                    sb.AppendLine("                return _result;");
+                    sb.AppendLine("            };");
                 }
 
                 for (var i = sortedBehaviors.Length - 1; i >= 0; i--)
@@ -1439,7 +1651,7 @@ namespace AutoDispatch
         return sb.ToString();
     }
 
-    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions)
+    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors)
     {
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -1481,6 +1693,16 @@ namespace AutoDispatch
         foreach (var action in exceptionActions.OrderBy(static a => a.UnboundTypeFqn, StringComparer.Ordinal))
         {
             sb.AppendLine($"            services.AddScoped(typeof({action.UnboundTypeFqn}));");
+        }
+
+        foreach (var processor in preProcessors.OrderBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal))
+        {
+            sb.AppendLine($"            services.AddScoped(typeof({processor.UnboundTypeFqn}));");
+        }
+
+        foreach (var processor in postProcessors.OrderBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal))
+        {
+            sb.AppendLine($"            services.AddScoped(typeof({processor.UnboundTypeFqn}));");
         }
 
         sb.AppendLine("            services.AddScoped<global::AutoDispatch.IDispatcher, global::AutoDispatch.Dispatcher>();");
@@ -2096,6 +2318,234 @@ namespace AutoDispatch
         return false;
     }
 
+    private static PreProcessorCandidate? TransformPreProcessor(GeneratorAttributeSyntaxContext context, CancellationToken ct)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return null;
+        }
+
+        var processorDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var location = typeSymbol.Locations.FirstOrDefault() ?? Location.None;
+
+        if (typeSymbol.TypeKind != TypeKind.Class ||
+            typeSymbol.DeclaredAccessibility != Accessibility.Public ||
+            typeSymbol.IsAbstract ||
+            typeSymbol.TypeParameters.Length != 1)
+        {
+            return new PreProcessorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD021,
+                    location,
+                    processorDisplayName))
+            };
+        }
+
+        var preProcessorType = context.SemanticModel.Compilation.GetTypeByMetadataName("AutoDispatch.IPreProcessor`1");
+        var typeParameters = typeSymbol.TypeParameters;
+        var implementsPreProcessor =
+            preProcessorType is not null &&
+            typeSymbol.AllInterfaces.Any(interfaceSymbol =>
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.OriginalDefinition, preProcessorType) &&
+                interfaceSymbol.TypeArguments.Length == 1 &&
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.TypeArguments[0], typeParameters[0]));
+
+        if (!implementsPreProcessor)
+        {
+            return new PreProcessorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD022,
+                    location,
+                    processorDisplayName))
+            };
+        }
+
+        if (!HasValidPreProcessorProcessAsync(typeSymbol, context.SemanticModel.Compilation))
+        {
+            return new PreProcessorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD023,
+                    location,
+                    processorDisplayName))
+            };
+        }
+
+        var order = 0;
+        foreach (var attr in context.Attributes)
+        {
+            foreach (var arg in attr.NamedArguments)
+            {
+                if (arg.Key == "Order" && arg.Value.Value is int v)
+                {
+                    order = v;
+                }
+            }
+        }
+
+        return new PreProcessorCandidate
+        {
+            PreProcessor = new PreProcessorInfo
+            {
+                UnboundTypeFqn = ToFullyQualified(typeSymbol.ConstructUnboundGenericType()),
+                Order = order,
+                SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
+                SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
+                Location = location
+            }
+        };
+    }
+
+    private static bool HasValidPreProcessorProcessAsync(INamedTypeSymbol typeSymbol, Compilation compilation)
+    {
+        var cancellationTokenType = compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
+        var taskType = compilation.GetTypeByMetadataName("System.Threading.Tasks.Task");
+
+        if (cancellationTokenType is null || taskType is null)
+        {
+            return false;
+        }
+
+        foreach (var method in typeSymbol.GetMembers("ProcessAsync").OfType<IMethodSymbol>())
+        {
+            if (method.MethodKind != MethodKind.Ordinary ||
+                method.IsStatic ||
+                method.DeclaredAccessibility != Accessibility.Public ||
+                method.Parameters.Length != 2 ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, typeSymbol.TypeParameters[0]) ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[1].Type, cancellationTokenType))
+            {
+                continue;
+            }
+
+            if (!SymbolEqualityComparer.Default.Equals(method.ReturnType, taskType))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static PostProcessorCandidate? TransformPostProcessor(GeneratorAttributeSyntaxContext context, CancellationToken ct)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return null;
+        }
+
+        var processorDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var location = typeSymbol.Locations.FirstOrDefault() ?? Location.None;
+
+        if (typeSymbol.TypeKind != TypeKind.Class ||
+            typeSymbol.DeclaredAccessibility != Accessibility.Public ||
+            typeSymbol.IsAbstract ||
+            typeSymbol.TypeParameters.Length != 2)
+        {
+            return new PostProcessorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD024,
+                    location,
+                    processorDisplayName))
+            };
+        }
+
+        var postProcessorType = context.SemanticModel.Compilation.GetTypeByMetadataName("AutoDispatch.IPostProcessor`2");
+        var typeParameters = typeSymbol.TypeParameters;
+        var implementsPostProcessor =
+            postProcessorType is not null &&
+            typeSymbol.AllInterfaces.Any(interfaceSymbol =>
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.OriginalDefinition, postProcessorType) &&
+                interfaceSymbol.TypeArguments.Length == 2 &&
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.TypeArguments[0], typeParameters[0]) &&
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.TypeArguments[1], typeParameters[1]));
+
+        if (!implementsPostProcessor)
+        {
+            return new PostProcessorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD025,
+                    location,
+                    processorDisplayName))
+            };
+        }
+
+        if (!HasValidPostProcessorProcessAsync(typeSymbol, context.SemanticModel.Compilation))
+        {
+            return new PostProcessorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD026,
+                    location,
+                    processorDisplayName))
+            };
+        }
+
+        var order = 0;
+        foreach (var attr in context.Attributes)
+        {
+            foreach (var arg in attr.NamedArguments)
+            {
+                if (arg.Key == "Order" && arg.Value.Value is int v)
+                {
+                    order = v;
+                }
+            }
+        }
+
+        return new PostProcessorCandidate
+        {
+            PostProcessor = new PostProcessorInfo
+            {
+                UnboundTypeFqn = ToFullyQualified(typeSymbol.ConstructUnboundGenericType()),
+                Order = order,
+                SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
+                SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
+                Location = location
+            }
+        };
+    }
+
+    private static bool HasValidPostProcessorProcessAsync(INamedTypeSymbol typeSymbol, Compilation compilation)
+    {
+        var cancellationTokenType = compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
+        var taskType = compilation.GetTypeByMetadataName("System.Threading.Tasks.Task");
+
+        if (cancellationTokenType is null || taskType is null)
+        {
+            return false;
+        }
+
+        foreach (var method in typeSymbol.GetMembers("ProcessAsync").OfType<IMethodSymbol>())
+        {
+            if (method.MethodKind != MethodKind.Ordinary ||
+                method.IsStatic ||
+                method.DeclaredAccessibility != Accessibility.Public ||
+                method.Parameters.Length != 3 ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, typeSymbol.TypeParameters[0]) ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[1].Type, typeSymbol.TypeParameters[1]) ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[2].Type, cancellationTokenType))
+            {
+                continue;
+            }
+
+            if (!SymbolEqualityComparer.Default.Equals(method.ReturnType, taskType))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private sealed class HandlerInfo
     {
         public string HandlerTypeFqn { get; set; } = string.Empty;
@@ -2220,6 +2670,46 @@ namespace AutoDispatch
     private sealed class ExceptionActionCandidate
     {
         public ExceptionActionInfo? ExceptionAction { get; set; }
+
+        public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
+    }
+
+    private sealed class PreProcessorInfo
+    {
+        public string UnboundTypeFqn { get; set; } = string.Empty;
+
+        public int Order { get; set; }
+
+        public string SortFilePath { get; set; } = string.Empty;
+
+        public int SortSpanStart { get; set; }
+
+        public Location Location { get; set; } = Location.None;
+    }
+
+    private sealed class PreProcessorCandidate
+    {
+        public PreProcessorInfo? PreProcessor { get; set; }
+
+        public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
+    }
+
+    private sealed class PostProcessorInfo
+    {
+        public string UnboundTypeFqn { get; set; } = string.Empty;
+
+        public int Order { get; set; }
+
+        public string SortFilePath { get; set; } = string.Empty;
+
+        public int SortSpanStart { get; set; }
+
+        public Location Location { get; set; } = Location.None;
+    }
+
+    private sealed class PostProcessorCandidate
+    {
+        public PostProcessorInfo? PostProcessor { get; set; }
 
         public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
     }

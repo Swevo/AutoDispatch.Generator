@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.12.0] - 2026-09-15
+
+### Added
+- **Request pre/post-processors** — matching MediatR's `IRequestPreProcessor<TRequest>` and `IRequestPostProcessor<TRequest, TResponse>`. Mark a public, open generic class with one type parameter (`TCommand`) implementing `IPreProcessor<TCommand>` as `[PreProcessor(Order = N)]` to run unconditionally right before a handler executes, or a class with two type parameters (`TCommand`, `TResult`) implementing `IPostProcessor<TCommand, TResult>` as `[PostProcessor(Order = N)]` to run right after, given the handler's response — without needing to write a full `[Behavior]` that calls a `next()` delegate
+- Pre/post-processors sit as the innermost step of the generated pipeline, running directly around the handler call and inside any custom `[Behavior]`s (verified: `behavior-before -> pre -> handler -> post -> behavior-after`)
+- For void-async handlers, post-processors receive `Unit.Value` as the response, matching the same convention used elsewhere in the pipeline
+- AD021 (Error): `[PreProcessor]` type is not a public, non-abstract open generic class with exactly one type parameter
+- AD022 (Error): `[PreProcessor]` type does not implement `IPreProcessor<TCommand>`
+- AD023 (Error): `[PreProcessor]` type does not expose a valid public `ProcessAsync` method
+- AD024 (Error): `[PostProcessor]` type is not a public, non-abstract open generic class with exactly two type parameters
+- AD025 (Error): `[PostProcessor]` type does not implement `IPostProcessor<TCommand, TResult>`
+- AD026 (Error): `[PostProcessor]` type does not expose a valid public `ProcessAsync` method
+- `AddAutoDispatch()` now also registers `[PreProcessor]`/`[PostProcessor]` open-generic types
+- README: new "Request pre/post-processors" subsection, updated diagnostics table (AD021-026) and feature bullets
+- 12 new tests (codegen for both processor kinds, DI registration, runtime ordering with and without custom behaviors, and all six diagnostics); 116/116 passing solution-wide
+
 ## [1.11.0] - 2026-09-16
 
 ### Added

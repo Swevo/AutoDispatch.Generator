@@ -16,6 +16,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Configurable notification fan-out** — `PublishAsync` runs handlers sequentially by default, or mark a notification `[ParallelPublish]` for `Task.WhenAll` concurrency
 - **Exception handling middleware** — `[ExceptionHandler]` open generics intercept a typed exception thrown by a handler or pipeline behavior and can supply a fallback response, matching MediatR's `IRequestExceptionHandler<,,>`
 - **Exception actions** — `[ExceptionAction]` open generics always run as side-effect-only observers on a typed exception (logging, metrics, alerting) without suppressing it, matching MediatR's `IRequestExceptionAction<,>`
+- **Request pre/post-processors** — `[PreProcessor]`/`[PostProcessor]` open generics run unconditionally right before/after a handler executes, without writing a full `next()`-calling pipeline behavior, matching MediatR's `IRequestPreProcessor<>`/`IRequestPostProcessor<,>`
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -522,6 +523,48 @@ Conventions:
   handlers together, so mixing the two for overlapping exception hierarchies still produces valid,
   correctly-ordered C#.
 
+### Request pre/post-processors
+
+Matching MediatR's `IRequestPreProcessor<TRequest>` and `IRequestPostProcessor<TRequest, TResponse>`,
+you can register processors that always run immediately before or after a command/query handler
+executes — without writing a full `[Behavior]` (which requires calling a `next()` delegate
+yourself). Pre/post-processors sit as the **innermost** step of the pipeline, running directly
+around the handler call, inside any custom `[Behavior]`s:
+
+```csharp
+using AutoDispatch;
+
+[PreProcessor(Order = 0)]
+public sealed class LoggingPreProcessor<TCommand> : IPreProcessor<TCommand>
+{
+    public Task ProcessAsync(TCommand command, CancellationToken ct = default)
+    {
+        _logger.LogInformation("Handling {Command}", command);
+        return Task.CompletedTask;
+    }
+}
+
+[PostProcessor(Order = 0)]
+public sealed class LoggingPostProcessor<TCommand, TResult> : IPostProcessor<TCommand, TResult>
+{
+    public Task ProcessAsync(TCommand command, TResult response, CancellationToken ct = default)
+    {
+        _logger.LogInformation("Handled {Command} -> {Response}", command, response);
+        return Task.CompletedTask;
+    }
+}
+```
+
+Conventions:
+- `[PreProcessor]` is a public, open generic class with exactly one type parameter (`TCommand`)
+  implementing `IPreProcessor<TCommand>`; `[PostProcessor]` has exactly two (`TCommand`, `TResult`)
+  implementing `IPostProcessor<TCommand, TResult>` — both are fully open (unlike `[ExceptionHandler]`/
+  `[ExceptionAction]`, there's no fixed exception type to validate).
+- All matching pre-processors run first (in `Order`), then the handler, then all matching
+  post-processors (in `Order`, receiving the handler's response) — for void-async handlers the
+  response is `Unit.Value`.
+- With no `[PreProcessor]`/`[PostProcessor]`s registered, dispatch codegen is unchanged.
+
 ## Diagnostics
 
 | Code | Severity | Description |
@@ -546,6 +589,12 @@ Conventions:
 | AD018 | Error | `[ExceptionAction]` type is not a public, non-abstract open generic class with exactly one type parameter |
 | AD019 | Error | `[ExceptionAction]` type does not implement `IExceptionAction<TCommand, TException>` for a fixed exception type |
 | AD020 | Error | `[ExceptionAction]` type does not expose a valid public `ExecuteAsync` method |
+| AD021 | Error | `[PreProcessor]` type is not a public, non-abstract open generic class with exactly one type parameter |
+| AD022 | Error | `[PreProcessor]` type does not implement `IPreProcessor<TCommand>` |
+| AD023 | Error | `[PreProcessor]` type does not expose a valid public `ProcessAsync` method |
+| AD024 | Error | `[PostProcessor]` type is not a public, non-abstract open generic class with exactly two type parameters |
+| AD025 | Error | `[PostProcessor]` type does not implement `IPostProcessor<TCommand, TResult>` |
+| AD026 | Error | `[PostProcessor]` type does not expose a valid public `ProcessAsync` method |
 
 ### AD001
 

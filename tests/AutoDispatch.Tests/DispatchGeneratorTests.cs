@@ -2505,5 +2505,336 @@ public sealed class LoggingExceptionAction<TCommand> : IExceptionAction<TCommand
 
         Assert.Contains(diagnostics, d => d.Id == "AD020" && d.Severity == DiagnosticSeverity.Error);
     }
+
+    // ---- Pre/post processors ----
+
+    [Fact]
+    public void PreProcessorAttribute_GeneratedInAttributesFile()
+    {
+        var src = RunGenerator(string.Empty, out _)["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("PreProcessorAttribute", src);
+        Assert.Contains("IPreProcessor", src);
+        Assert.Contains("PostProcessorAttribute", src);
+        Assert.Contains("IPostProcessor", src);
+    }
+
+    [Fact]
+    public void PreProcessor_GeneratesCallBeforeHandlerInvocation()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[PreProcessor]
+public sealed class LoggingPreProcessor<TCommand> : IPreProcessor<TCommand>
+{
+    public Task ProcessAsync(TCommand command, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("LoggingPreProcessor<", src);
+        Assert.Contains(".ProcessAsync(command, ct)", src);
+    }
+
+    [Fact]
+    public void PostProcessor_GeneratesCallAfterHandlerInvocationWithResponse()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[PostProcessor]
+public sealed class LoggingPostProcessor<TCommand, TResult> : IPostProcessor<TCommand, TResult>
+{
+    public Task ProcessAsync(TCommand command, TResult response, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("LoggingPostProcessor<", src);
+        Assert.Contains(".ProcessAsync(command, _result, ct)", src);
+    }
+
+    [Fact]
+    public void PreAndPostProcessors_RegisteredInDI()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[PreProcessor]
+public sealed class LoggingPreProcessor<TCommand> : IPreProcessor<TCommand>
+{
+    public Task ProcessAsync(TCommand command, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+[PostProcessor]
+public sealed class LoggingPostProcessor<TCommand, TResult> : IPostProcessor<TCommand, TResult>
+{
+    public Task ProcessAsync(TCommand command, TResult response, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped(typeof(global::LoggingPreProcessor<>));", src);
+        Assert.Contains("services.AddScoped(typeof(global::LoggingPostProcessor<,>));", src);
+    }
+
+    [Fact]
+    public async Task PreAndPostProcessors_Runtime_RunInCorrectOrderWithResponse()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId
+{
+    public string Value { get; }
+    public OrderId(string value) => Value = value;
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handler"");
+        return Task.FromResult(new OrderId(""created""));
+    }
+}
+
+[PreProcessor]
+public sealed class LoggingPreProcessor<TCommand> : IPreProcessor<TCommand>
+{
+    public Task ProcessAsync(TCommand command, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""pre"");
+        return Task.CompletedTask;
+    }
+}
+
+[PostProcessor]
+public sealed class LoggingPostProcessor<TCommand, TResult> : IPostProcessor<TCommand, TResult>
+{
+    public Task ProcessAsync(TCommand command, TResult response, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""post:"" + ((OrderId)(object)response!).Value);
+        return Task.CompletedTask;
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var result = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+
+        Assert.Equal(new[] { "pre", "handler", "post:created" }, GetRecorderEntries(compiled.Assembly));
+        var valueProperty = result!.GetType().GetProperty("Value")!;
+        Assert.Equal("created", valueProperty.GetValue(result));
+    }
+
+    [Fact]
+    public async Task PreAndPostProcessors_Runtime_WrapAroundCustomBehaviors()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handler"");
+        return Task.FromResult(new OrderId());
+    }
+}
+
+[Behavior]
+public sealed class LoggingBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+{
+    public async Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""behavior-before"");
+        var result = await next();
+        Recorder.Entries.Add(""behavior-after"");
+        return result;
+    }
+}
+
+[PreProcessor]
+public sealed class LoggingPreProcessor<TCommand> : IPreProcessor<TCommand>
+{
+    public Task ProcessAsync(TCommand command, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""pre"");
+        return Task.CompletedTask;
+    }
+}
+
+[PostProcessor]
+public sealed class LoggingPostProcessor<TCommand, TResult> : IPostProcessor<TCommand, TResult>
+{
+    public Task ProcessAsync(TCommand command, TResult response, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""post"");
+        return Task.CompletedTask;
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+
+        // Pre/post processors sit innermost, right around the handler call, inside custom behaviors.
+        Assert.Equal(
+            new[] { "behavior-before", "pre", "handler", "post", "behavior-after" },
+            GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public void Diagnostic_AD021_PreProcessorMustBeOpenGeneric()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[PreProcessor]
+public sealed class LoggingPreProcessor : IPreProcessor<object>
+{
+    public Task ProcessAsync(object command, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD021" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD022_PreProcessorMustImplementInterface()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[PreProcessor]
+public sealed class NotAPreProcessor<TCommand>
+{
+    public Task ProcessAsync(TCommand command, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD022" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD023_PreProcessorMustExposePublicProcessAsync()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[PreProcessor]
+public sealed class LoggingPreProcessor<TCommand> : IPreProcessor<TCommand>
+{
+    Task IPreProcessor<TCommand>.ProcessAsync(TCommand command, CancellationToken ct) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD023" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD024_PostProcessorMustBeOpenGeneric()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[PostProcessor]
+public sealed class LoggingPostProcessor : IPostProcessor<object, object>
+{
+    public Task ProcessAsync(object command, object response, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD024" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD025_PostProcessorMustImplementInterface()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[PostProcessor]
+public sealed class NotAPostProcessor<TCommand, TResult>
+{
+    public Task ProcessAsync(TCommand command, TResult response, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD025" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD026_PostProcessorMustExposePublicProcessAsync()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[PostProcessor]
+public sealed class LoggingPostProcessor<TCommand, TResult> : IPostProcessor<TCommand, TResult>
+{
+    Task IPostProcessor<TCommand, TResult>.ProcessAsync(TCommand command, TResult response, CancellationToken ct) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD026" && d.Severity == DiagnosticSeverity.Error);
+    }
 }
 
