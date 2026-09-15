@@ -1952,5 +1952,317 @@ public sealed class LoggingStreamBehavior<TQuery, TResult> : IStreamPipelineBeha
 
         Assert.Contains(diagnostics, d => d.Id == "AD014" && d.Severity == DiagnosticSeverity.Error);
     }
+
+    // ---- Exception handling middleware ----
+
+    [Fact]
+    public void ExceptionHandlerAttribute_GeneratedInAttributesFile()
+    {
+        var src = RunGenerator(string.Empty, out _)["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("ExceptionHandlerAttribute", src);
+        Assert.Contains("IExceptionHandler", src);
+        Assert.Contains("ExceptionHandlerResult", src);
+    }
+
+    [Fact]
+    public void ExceptionHandler_TaskOfT_GeneratesTryCatch()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Unhandled());
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("public async ", src);
+        Assert.Contains("catch (global::ValidationException ex)", src);
+        Assert.Contains("ValidationExceptionHandler<", src);
+        Assert.Contains(".IsHandled", src);
+    }
+
+    [Fact]
+    public void ExceptionHandler_NoHandlers_SimpleDispatchPreserved()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.DoesNotContain("try", src);
+        Assert.DoesNotContain("catch (", src);
+    }
+
+    [Fact]
+    public void ExceptionHandler_RegisteredInDI()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Unhandled());
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped(typeof(global::ValidationExceptionHandler<,>));", src);
+    }
+
+    [Fact]
+    public void ExceptionHandler_MostDerivedExceptionCaughtFirst()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class GeneralExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, System.Exception>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, System.Exception exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Unhandled());
+}
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Unhandled());
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        var validationIdx = src.IndexOf("catch (global::ValidationException ex)", System.StringComparison.Ordinal);
+        var generalIdx = src.IndexOf("catch (global::System.Exception ex)", System.StringComparison.Ordinal);
+        Assert.True(validationIdx >= 0 && generalIdx >= 0);
+        Assert.True(validationIdx < generalIdx, "The more-derived ValidationException catch must be emitted before the base System.Exception catch, or the compiler would reject the base catch as unreachable-shadowing.");
+    }
+
+    [Fact]
+    public async Task ExceptionHandler_Runtime_HandlesExceptionAndReturnsFallback()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId
+{
+    public string Value { get; }
+    public OrderId(string value) => Value = value;
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+        => throw new ValidationException();
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Handled((TResult)(object)new OrderId(""fallback"")));
+}";
+
+        using var compiled = CompileAssembly(source);
+        var result = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+
+        var valueProperty = result!.GetType().GetProperty("Value")!;
+        Assert.Equal("fallback", valueProperty.GetValue(result));
+    }
+
+    [Fact]
+    public async Task ExceptionHandler_Runtime_UnhandledExceptionPropagates()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+        => throw new System.InvalidOperationException(""boom"");
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Unhandled());
+}";
+
+        using var compiled = CompileAssembly(source);
+        var dispatcherType = compiled.Assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var dispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+        var commandType = compiled.Assembly.GetType("CreateOrderCommand", throwOnError: true)!;
+        var sendAsync = dispatcherType.GetMethod("SendAsync", BindingFlags.Instance | BindingFlags.Public)!;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            var task = (Task)sendAsync.Invoke(dispatcher, new object[] { Activator.CreateInstance(commandType)!, CancellationToken.None })!;
+            await task;
+        });
+    }
+
+    [Fact]
+    public async Task ExceptionHandler_Runtime_VoidAsyncHandlerCanBeHandled()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class PingCommand { }
+
+[Handler]
+public sealed class PingHandler
+{
+    public Task HandleAsync(PingCommand cmd, CancellationToken ct = default)
+        => throw new ValidationException();
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handled"");
+        return Task.FromResult(ExceptionHandlerResult<TResult>.Handled(default!));
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokeSendAsync(compiled.Assembly, "PingCommand");
+
+        Assert.Equal(new[] { "handled" }, GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public void Diagnostic_AD015_ExceptionHandlerMustBeOpenGeneric()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler : IExceptionHandler<object, object, ValidationException>
+{
+    public Task<ExceptionHandlerResult<object>> HandleAsync(object command, ValidationException exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<object>.Unhandled());
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD015" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD016_ExceptionHandlerMustImplementInterfaceWithFixedException()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[ExceptionHandler]
+public sealed class NotAHandler<TCommand, TResult>
+{
+    public Task<TResult> HandleAsync(TCommand command, CancellationToken ct = default) => default!;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD016" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD017_ExceptionHandlerMustExposePublicHandleAsync()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    Task<ExceptionHandlerResult<TResult>> IExceptionHandler<TCommand, TResult, ValidationException>.HandleAsync(TCommand command, ValidationException exception, CancellationToken ct)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Unhandled());
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD017" && d.Severity == DiagnosticSeverity.Error);
+    }
 }
 

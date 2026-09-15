@@ -14,6 +14,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Zero reflection** — direct generated calls, no runtime dispatch overhead
 - **Pipeline behaviors** — `[Behavior(Order = N)]` wraps all async handlers at compile time, and `[StreamBehavior(Order = N)]` wraps streaming queries the same way; no `IPipelineBehavior<,>` magic at runtime
 - **Configurable notification fan-out** — `PublishAsync` runs handlers sequentially by default, or mark a notification `[ParallelPublish]` for `Task.WhenAll` concurrency
+- **Exception handling middleware** — `[ExceptionHandler]` open generics intercept a typed exception thrown by a handler or pipeline behavior and can supply a fallback response, matching MediatR's `IRequestExceptionHandler<,,>`
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -443,6 +444,48 @@ before (no wrapping overhead). Once one or more are registered, AutoDispatch bui
 `Func<IAsyncEnumerable<TResult>>` calls — nothing runs until the caller actually enumerates the
 result, matching the handler's own laziness.
 
+## Exception handling
+
+Matching MediatR's `IRequestExceptionHandler<TRequest, TResponse, TException>`, you can register
+typed handlers that intercept an exception thrown by a command/query handler (or by any
+`[Behavior]` in its pipeline) and either supply a fallback response or let it keep propagating.
+Declare a public, open generic class with exactly two type parameters (`TCommand`, `TResult`)
+implementing `IExceptionHandler<TCommand, TResult, TException>` for one **fixed, concrete**
+exception type:
+
+```csharp
+using AutoDispatch;
+
+public sealed class ValidationException : Exception { }
+
+[ExceptionHandler(Order = 0)]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+    {
+        _logger.LogWarning(exception, "Validation failed for {Command}", command);
+
+        // Return a fallback response instead of letting the exception propagate:
+        return Task.FromResult(ExceptionHandlerResult<TResult>.Handled(default!));
+
+        // Or let it keep propagating (e.g. to the next applicable handler, or to the caller):
+        // return Task.FromResult(ExceptionHandlerResult<TResult>.Unhandled());
+    }
+}
+```
+
+Conventions:
+- With no `[ExceptionHandler]`s registered, dispatch codegen is byte-for-byte unchanged from
+  earlier versions — no `try`/`catch`, no `async` overhead added.
+- Once one or more are registered, every async command/query dispatch method (with or without
+  `[Behavior]`s) is wrapped in a `try`/`catch` per distinct exception type.
+- Multiple handlers may target unrelated or related exception types; catch clauses are always
+  generated **most-derived exception type first** (so a handler for `Exception` never shadows one
+  for `ValidationException`), then by `Order` (ascending), then by declaration order — this also
+  matches how ordinary C# `catch` blocks must be ordered to compile.
+- If a handler returns `Unhandled()`, the exception is rethrown so the next applicable handler (or
+  the caller) sees it, exactly like MediatR's behavior when no handler sets `state.Handled`.
+
 ## Diagnostics
 
 | Code | Severity | Description |
@@ -461,6 +504,9 @@ result, matching the handler's own laziness.
 | AD012 | Error | `[StreamBehavior]` type is not a public, non-abstract open generic class with exactly two type parameters |
 | AD013 | Error | `[StreamBehavior]` type does not implement `IStreamPipelineBehavior<TQuery, TResult>` |
 | AD014 | Error | `[StreamBehavior]` type does not expose a valid public `HandleAsync` method |
+| AD015 | Error | `[ExceptionHandler]` type is not a public, non-abstract open generic class with exactly two type parameters |
+| AD016 | Error | `[ExceptionHandler]` type does not implement `IExceptionHandler<TCommand, TResult, TException>` for a fixed exception type |
+| AD017 | Error | `[ExceptionHandler]` type does not expose a valid public `HandleAsync` method |
 
 ### AD001
 
@@ -635,8 +681,8 @@ Generates a ready-to-fill `CreateOrderCommand.cs` with the command record and `[
 
 | Approach | Boilerplate | Runtime dispatch | Pipeline behaviors | Notifications (publish) | Streaming queries | Compile-time safety | AOT |
 |---|---|---|---|---|---|---|---|
-| **AutoDispatch** | Low | None | Compile-time generated | ✅ (fan-out, sequential or `[ParallelPublish]`) | ✅ (`IAsyncEnumerable<T>` + pipeline) | High | ✅ |
-| **MediatR** | Medium | Yes | Runtime reflection | ✅ | ✅ | High | ⚠️ |
+| **AutoDispatch** | Low | None | Compile-time generated, with typed `[ExceptionHandler]`s | ✅ (fan-out, sequential or `[ParallelPublish]`) | ✅ (`IAsyncEnumerable<T>` + pipeline) | High | ✅ |
+| **MediatR** | Medium | Yes | Runtime reflection, with `IRequestExceptionHandler<,,>` | ✅ | ✅ | High | ⚠️ |
 | **Raw service calls** | Low | None | Manual | Manual | Manual | High | ✅ |
 
 ### Benchmarks

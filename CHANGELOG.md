@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.10.0] - 2026-09-16
+
+### Added
+- **Exception handling middleware** — matching MediatR's `IRequestExceptionHandler<TRequest, TResponse, TException>`. Declare a public, open generic class with exactly two type parameters (`TCommand`, `TResult`) implementing `IExceptionHandler<TCommand, TResult, TException>` for one fixed, concrete exception type, mark it `[ExceptionHandler(Order = N)]`, and AutoDispatch wraps every async command/query dispatch method (with or without `[Behavior]`s) in a generated `try`/`catch` for that exception type, calling your handler to either supply a fallback response (`ExceptionHandlerResult<TResult>.Handled(response)`) or let the exception keep propagating (`.Unhandled()`)
+- Catch clauses are always generated most-derived-exception-type first (computed from the real inheritance depth of the declared exception type), then by `Order`, then by declaration order — guarantees generated code compiles even when handlers target both a base and derived exception type, and mirrors how a human would order hand-written catch blocks
+- With no `[ExceptionHandler]`s registered, dispatch codegen is completely unchanged (no `try`/`catch`, no added `async` overhead) — fully backward compatible
+- AD015 (Error): `[ExceptionHandler]` type is not a public, non-abstract open generic class with exactly two type parameters
+- AD016 (Error): `[ExceptionHandler]` type does not implement `IExceptionHandler<TCommand, TResult, TException>` for one fixed exception type
+- AD017 (Error): `[ExceptionHandler]` type does not expose a valid public `HandleAsync` method
+- `AddAutoDispatch()` now also registers `[ExceptionHandler]` open-generic types, same as `[Behavior]`
+- README: new "Exception handling" section, updated diagnostics table (AD015-017), comparison table, and feature bullets
+- 11 new tests (codegen for both the `Task<TResult>` and void-async shapes, most-derived-first catch ordering, DI registration, runtime handled/unhandled/void-async behavior, and all three diagnostics); 96/96 passing solution-wide
+
 ## [1.9.0] - 2026-09-16
 
 ### Added
