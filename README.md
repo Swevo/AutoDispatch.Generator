@@ -15,6 +15,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Pipeline behaviors** — `[Behavior(Order = N)]` wraps all async handlers at compile time, and `[StreamBehavior(Order = N)]` wraps streaming queries the same way; no `IPipelineBehavior<,>` magic at runtime
 - **Configurable notification fan-out** — `PublishAsync` runs handlers sequentially by default, or mark a notification `[ParallelPublish]` for `Task.WhenAll` concurrency
 - **Exception handling middleware** — `[ExceptionHandler]` open generics intercept a typed exception thrown by a handler or pipeline behavior and can supply a fallback response, matching MediatR's `IRequestExceptionHandler<,,>`
+- **Exception actions** — `[ExceptionAction]` open generics always run as side-effect-only observers on a typed exception (logging, metrics, alerting) without suppressing it, matching MediatR's `IRequestExceptionAction<,>`
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -486,6 +487,41 @@ Conventions:
 - If a handler returns `Unhandled()`, the exception is rethrown so the next applicable handler (or
   the caller) sees it, exactly like MediatR's behavior when no handler sets `state.Handled`.
 
+### Exception actions
+
+Matching MediatR's `IRequestExceptionAction<TRequest, TException>`, you can also register
+side-effect-only observers that **always** run when a matching exception is thrown — they cannot
+suppress the exception or supply a fallback response, unlike `[ExceptionHandler]`. This is the
+right tool for logging, metrics, or alerting that must fire regardless of whether some other
+handler ultimately recovers. Declare a public, open generic class with exactly **one** type
+parameter (`TCommand`) implementing `IExceptionAction<TCommand, TException>` for one fixed,
+concrete exception type:
+
+```csharp
+using AutoDispatch;
+
+[ExceptionAction(Order = 0)]
+public sealed class LoggingExceptionAction<TCommand> : IExceptionAction<TCommand, ValidationException>
+{
+    public Task ExecuteAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+    {
+        _logger.LogWarning(exception, "Validation failed for {Command}", command);
+        return Task.CompletedTask;
+    }
+}
+```
+
+Conventions:
+- Actions and handlers for the same exception type share the same generated `catch` block; within
+  it, **all matching actions run first** (in `Order`), then the matching handlers run — mirroring
+  MediatR's pipeline where `IRequestExceptionAction` always executes before
+  `IRequestExceptionHandler` gets a chance to short-circuit.
+- Actions run even when no `[ExceptionHandler]` is registered for the exception type at all — the
+  exception is rethrown afterward via `throw;`, preserving the original stack trace.
+- Catch-block ordering (most-derived exception type first) is computed across **both** actions and
+  handlers together, so mixing the two for overlapping exception hierarchies still produces valid,
+  correctly-ordered C#.
+
 ## Diagnostics
 
 | Code | Severity | Description |
@@ -507,6 +543,9 @@ Conventions:
 | AD015 | Error | `[ExceptionHandler]` type is not a public, non-abstract open generic class with exactly two type parameters |
 | AD016 | Error | `[ExceptionHandler]` type does not implement `IExceptionHandler<TCommand, TResult, TException>` for a fixed exception type |
 | AD017 | Error | `[ExceptionHandler]` type does not expose a valid public `HandleAsync` method |
+| AD018 | Error | `[ExceptionAction]` type is not a public, non-abstract open generic class with exactly one type parameter |
+| AD019 | Error | `[ExceptionAction]` type does not implement `IExceptionAction<TCommand, TException>` for a fixed exception type |
+| AD020 | Error | `[ExceptionAction]` type does not expose a valid public `ExecuteAsync` method |
 
 ### AD001
 

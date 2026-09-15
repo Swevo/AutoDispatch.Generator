@@ -208,6 +208,31 @@ namespace AutoDispatch
             }
         }
     }
+
+    /// <summary>
+    /// Marks a class as an exception *action* — a side-effect-only observer (e.g. logging,
+    /// metrics) for a fixed, concrete exception type thrown by a command/query handler or pipeline
+    /// behavior. Unlike <see cref=""IExceptionHandler{TCommand, TResult, TException}""/>, an
+    /// exception action cannot supply a fallback response or suppress the exception — every
+    /// registered action for a matching exception type always runs, and the exception always
+    /// continues to any <see cref=""IExceptionHandler{TCommand, TResult, TException}""/> and then
+    /// (if unhandled) back to the caller. Declare a public, open generic class with exactly one
+    /// type parameter (<c>TCommand</c>) implementing <see cref=""IExceptionAction{TCommand, TException}""/>.
+    /// Matches MediatR's <c>IRequestExceptionAction&lt;TRequest, TException&gt;</c>.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class ExceptionActionAttribute : Attribute
+    {
+        public int Order { get; set; } = 0;
+    }
+
+    public interface IExceptionAction<TCommand, TException> where TException : System.Exception
+    {
+        System.Threading.Tasks.Task ExecuteAsync(
+            TCommand command,
+            TException exception,
+            System.Threading.CancellationToken ct = default);
+    }
 }
 ";
 
@@ -347,6 +372,30 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD018 = new(
+        id: "AD018",
+        title: "Exception action must be an open generic class",
+        messageFormat: "[ExceptionAction] on '{0}' must be a public, non-abstract class with exactly one type parameter so AutoDispatch can close it as `<TCommand>`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD019 = new(
+        id: "AD019",
+        title: "Exception action must implement IExceptionAction for a fixed exception type",
+        messageFormat: "[ExceptionAction] on '{0}' must implement `AutoDispatch.IExceptionAction<TCommand, TException>` using its declared `TCommand` type parameter and one concrete, fixed exception type",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD020 = new(
+        id: "AD020",
+        title: "Exception action has an invalid ExecuteAsync signature",
+        messageFormat: "[ExceptionAction] on '{0}' must declare `public Task ExecuteAsync(TCommand command, TException exception, CancellationToken ct = default)`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -406,13 +455,25 @@ namespace AutoDispatch
             .Select(static (b, _) => b!)
             .Collect();
 
-        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionHandlers);
+        var exceptionActions = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.ExceptionActionAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax,
+                transform: static (ctx, ct) => TransformExceptionAction(ctx, ct))
+            .Where(static b => b is not null)
+            .Select(static (b, _) => b!)
+            .Collect();
+
+        var exceptionMiddleware = exceptionHandlers.Combine(exceptionActions);
+
+        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var (((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList), exceptionHandlerList) = tuple;
+            var (((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList), exceptionMiddlewareTuple) = tuple;
             var ((h1, h2), h3) = handlersTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList, exceptionHandlerList);
+            var (exceptionHandlerList, exceptionActionList) = exceptionMiddlewareTuple;
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList);
         });
     }
 
@@ -729,7 +790,8 @@ namespace AutoDispatch
         ImmutableArray<NotificationHandlerInfo> notificationHandlers,
         ImmutableArray<StreamHandlerInfo> streamHandlers,
         ImmutableArray<StreamBehaviorCandidate> streamBehaviorCandidates,
-        ImmutableArray<ExceptionHandlerCandidate> exceptionHandlerCandidates)
+        ImmutableArray<ExceptionHandlerCandidate> exceptionHandlerCandidates,
+        ImmutableArray<ExceptionActionCandidate> exceptionActionCandidates)
     {
         var behaviors = new List<BehaviorInfo>();
         var seenBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -763,6 +825,23 @@ namespace AutoDispatch
             }
 
             exceptionHandlers.Add(candidate.ExceptionHandler);
+        }
+
+        var exceptionActions = new List<ExceptionActionInfo>();
+        var seenExceptionActionTypes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in exceptionActionCandidates)
+        {
+            foreach (var diagnostic in candidate.Diagnostics)
+            {
+                context.ReportDiagnostic(diagnostic);
+            }
+
+            if (candidate.ExceptionAction is null || !seenExceptionActionTypes.Add(candidate.ExceptionAction.UnboundTypeFqn))
+            {
+                continue;
+            }
+
+            exceptionActions.Add(candidate.ExceptionAction);
         }
 
         var streamBehaviors = new List<StreamBehaviorInfo>();
@@ -970,11 +1049,11 @@ namespace AutoDispatch
             return;
         }
 
-        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors, exceptionHandlers));
-        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, streamBehaviors, exceptionHandlers));
+        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions));
+        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, streamBehaviors, exceptionHandlers, exceptionActions));
     }
 
-    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers)
+    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions)
     {
         var sortedBehaviors = behaviors
             .OrderBy(static b => b.Order)
@@ -993,28 +1072,38 @@ namespace AutoDispatch
         var hasStreamBehaviors = sortedStreamBehaviors.Length > 0;
 
         // Catch clauses must go most-derived-exception-type first, or the C# compiler rejects a
-        // base-type catch that would make a later, more-specific catch unreachable. Handlers are
-        // grouped by exact exception type (one catch per distinct type, even if several handlers
-        // target it) so two handlers for the same exception type never produce a duplicate catch.
-        var exceptionHandlerGroups = exceptionHandlers
-            .GroupBy(static e => e.ExceptionTypeFqn, StringComparer.Ordinal)
-            .Select(static g => new
+        // base-type catch that would make a later, more-specific catch unreachable. Handlers and
+        // actions are grouped by exact exception type (one catch per distinct type, even if
+        // several handlers/actions target it) so two entries for the same exception type never
+        // produce a duplicate catch. Within a catch, every action always runs first (side effects
+        // only, never suppress), then handlers run in order until one reports `IsHandled`.
+        var exceptionMiddlewareGroups = exceptionHandlers
+            .Select(static e => e.ExceptionTypeFqn)
+            .Concat(exceptionActions.Select(static a => a.ExceptionTypeFqn))
+            .Distinct(StringComparer.Ordinal)
+            .Select(exceptionTypeFqn => new
             {
-                ExceptionTypeFqn = g.Key,
-                Depth = g.Max(static e => e.ExceptionDepth),
-                Handlers = g
+                ExceptionTypeFqn = exceptionTypeFqn,
+                Depth = Math.Max(
+                    exceptionHandlers.Where(e => e.ExceptionTypeFqn == exceptionTypeFqn).Select(static e => e.ExceptionDepth).DefaultIfEmpty(0).Max(),
+                    exceptionActions.Where(a => a.ExceptionTypeFqn == exceptionTypeFqn).Select(static a => a.ExceptionDepth).DefaultIfEmpty(0).Max()),
+                Actions = exceptionActions
+                    .Where(a => a.ExceptionTypeFqn == exceptionTypeFqn)
+                    .OrderBy(static a => a.Order)
+                    .ThenBy(static a => a.SortFilePath, StringComparer.Ordinal)
+                    .ThenBy(static a => a.SortSpanStart)
+                    .ToArray(),
+                Handlers = exceptionHandlers
+                    .Where(e => e.ExceptionTypeFqn == exceptionTypeFqn)
                     .OrderBy(static e => e.Order)
                     .ThenBy(static e => e.SortFilePath, StringComparer.Ordinal)
                     .ThenBy(static e => e.SortSpanStart)
                     .ToArray()
             })
             .OrderByDescending(static g => g.Depth)
-            .ThenBy(static g => g.Handlers[0].Order)
-            .ThenBy(static g => g.Handlers[0].SortFilePath, StringComparer.Ordinal)
-            .ThenBy(static g => g.Handlers[0].SortSpanStart)
             .ThenBy(static g => g.ExceptionTypeFqn, StringComparer.Ordinal)
             .ToArray();
-        var hasExceptionHandlers = exceptionHandlerGroups.Length > 0;
+        var hasExceptionHandlers = exceptionMiddlewareGroups.Length > 0;
 
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -1119,8 +1208,8 @@ namespace AutoDispatch
                 sb.AppendLine($"        // Pipeline: {pipelineOrder} -> {handlerShortName}.{method.MethodName} -> {pipelineOrder}");
                 if (hasExceptionHandlers)
                 {
-                    var exceptionOrder = string.Join(", ", exceptionHandlerGroups.Select(static g => GetShortTypeName(g.ExceptionTypeFqn)));
-                    sb.AppendLine($"        // Exception handlers (most-derived first): {exceptionOrder}");
+                    var exceptionOrder = string.Join(", ", exceptionMiddlewareGroups.Select(static g => GetShortTypeName(g.ExceptionTypeFqn)));
+                    sb.AppendLine($"        // Exception middleware (most-derived first): {exceptionOrder}");
                 }
 
                 sb.Append("        public ");
@@ -1162,10 +1251,16 @@ namespace AutoDispatch
                     sb.AppendLine("            }");
 
                     var handlerIndex = 0;
-                    foreach (var group in exceptionHandlerGroups)
+                    foreach (var group in exceptionMiddlewareGroups)
                     {
                         sb.AppendLine($"            catch ({group.ExceptionTypeFqn} ex)");
                         sb.AppendLine("            {");
+                        foreach (var action in group.Actions)
+                        {
+                            var actionTypeFqn = action.UnboundTypeFqn.Replace("<>", $"<{method.CommandTypeFqn}>");
+                            sb.AppendLine($"                await this._sp.GetRequiredService<{actionTypeFqn}>().ExecuteAsync(command, ex, ct).ConfigureAwait(false);");
+                        }
+
                         foreach (var eh in group.Handlers)
                         {
                             var ehTypeFqn = eh.UnboundTypeFqn.Replace("<,>", $"<{method.CommandTypeFqn}, {resultFqn}>");
@@ -1188,10 +1283,16 @@ namespace AutoDispatch
                     sb.AppendLine("            }");
 
                     var handlerIndex = 0;
-                    foreach (var group in exceptionHandlerGroups)
+                    foreach (var group in exceptionMiddlewareGroups)
                     {
                         sb.AppendLine($"            catch ({group.ExceptionTypeFqn} ex)");
                         sb.AppendLine("            {");
+                        foreach (var action in group.Actions)
+                        {
+                            var actionTypeFqn = action.UnboundTypeFqn.Replace("<>", $"<{method.CommandTypeFqn}>");
+                            sb.AppendLine($"                await this._sp.GetRequiredService<{actionTypeFqn}>().ExecuteAsync(command, ex, ct).ConfigureAwait(false);");
+                        }
+
                         foreach (var eh in group.Handlers)
                         {
                             var ehTypeFqn = eh.UnboundTypeFqn.Replace("<,>", $"<{method.CommandTypeFqn}, {resultFqn}>");
@@ -1338,7 +1439,7 @@ namespace AutoDispatch
         return sb.ToString();
     }
 
-    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers)
+    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions)
     {
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -1375,6 +1476,11 @@ namespace AutoDispatch
         foreach (var handler in exceptionHandlers.OrderBy(static e => e.UnboundTypeFqn, StringComparer.Ordinal))
         {
             sb.AppendLine($"            services.AddScoped(typeof({handler.UnboundTypeFqn}));");
+        }
+
+        foreach (var action in exceptionActions.OrderBy(static a => a.UnboundTypeFqn, StringComparer.Ordinal))
+        {
+            sb.AppendLine($"            services.AddScoped(typeof({action.UnboundTypeFqn}));");
         }
 
         sb.AppendLine("            services.AddScoped<global::AutoDispatch.IDispatcher, global::AutoDispatch.Dispatcher>();");
@@ -1865,6 +1971,131 @@ namespace AutoDispatch
         return false;
     }
 
+    private static ExceptionActionCandidate? TransformExceptionAction(GeneratorAttributeSyntaxContext context, CancellationToken ct)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return null;
+        }
+
+        var actionDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var location = typeSymbol.Locations.FirstOrDefault() ?? Location.None;
+
+        if (typeSymbol.TypeKind != TypeKind.Class ||
+            typeSymbol.DeclaredAccessibility != Accessibility.Public ||
+            typeSymbol.IsAbstract ||
+            typeSymbol.TypeParameters.Length != 1)
+        {
+            return new ExceptionActionCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD018,
+                    location,
+                    actionDisplayName))
+            };
+        }
+
+        var exceptionActionType = context.SemanticModel.Compilation.GetTypeByMetadataName("AutoDispatch.IExceptionAction`2");
+        var typeParameters = typeSymbol.TypeParameters;
+        var exceptionInterface = exceptionActionType is null
+            ? null
+            : typeSymbol.AllInterfaces.FirstOrDefault(interfaceSymbol =>
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.OriginalDefinition, exceptionActionType) &&
+                interfaceSymbol.TypeArguments.Length == 2 &&
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.TypeArguments[0], typeParameters[0]) &&
+                interfaceSymbol.TypeArguments[1] is not ITypeParameterSymbol);
+
+        if (exceptionInterface is null)
+        {
+            return new ExceptionActionCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD019,
+                    location,
+                    actionDisplayName))
+            };
+        }
+
+        var exceptionType = exceptionInterface.TypeArguments[1];
+
+        if (!HasValidExceptionActionExecuteAsync(typeSymbol, exceptionType, context.SemanticModel.Compilation))
+        {
+            return new ExceptionActionCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD020,
+                    location,
+                    actionDisplayName))
+            };
+        }
+
+        var order = 0;
+        foreach (var attr in context.Attributes)
+        {
+            foreach (var arg in attr.NamedArguments)
+            {
+                if (arg.Key == "Order" && arg.Value.Value is int v)
+                {
+                    order = v;
+                }
+            }
+        }
+
+        var depth = 0;
+        for (var t = exceptionType.BaseType; t is not null; t = t.BaseType)
+        {
+            depth++;
+        }
+
+        return new ExceptionActionCandidate
+        {
+            ExceptionAction = new ExceptionActionInfo
+            {
+                UnboundTypeFqn = ToFullyQualified(typeSymbol.ConstructUnboundGenericType()),
+                ExceptionTypeFqn = ToFullyQualified(exceptionType),
+                ExceptionDepth = depth,
+                Order = order,
+                SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
+                SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
+                Location = location
+            }
+        };
+    }
+
+    private static bool HasValidExceptionActionExecuteAsync(INamedTypeSymbol typeSymbol, ITypeSymbol exceptionType, Compilation compilation)
+    {
+        var cancellationTokenType = compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
+        var taskType = compilation.GetTypeByMetadataName("System.Threading.Tasks.Task");
+
+        if (cancellationTokenType is null || taskType is null)
+        {
+            return false;
+        }
+
+        foreach (var method in typeSymbol.GetMembers("ExecuteAsync").OfType<IMethodSymbol>())
+        {
+            if (method.MethodKind != MethodKind.Ordinary ||
+                method.IsStatic ||
+                method.DeclaredAccessibility != Accessibility.Public ||
+                method.Parameters.Length != 3 ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, typeSymbol.TypeParameters[0]) ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[1].Type, exceptionType) ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[2].Type, cancellationTokenType))
+            {
+                continue;
+            }
+
+            if (!SymbolEqualityComparer.Default.Equals(method.ReturnType, taskType))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private sealed class HandlerInfo
     {
         public string HandlerTypeFqn { get; set; } = string.Empty;
@@ -1964,6 +2195,31 @@ namespace AutoDispatch
     private sealed class ExceptionHandlerCandidate
     {
         public ExceptionHandlerInfo? ExceptionHandler { get; set; }
+
+        public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
+    }
+
+    private sealed class ExceptionActionInfo
+    {
+        public string UnboundTypeFqn { get; set; } = string.Empty;
+
+        public string ExceptionTypeFqn { get; set; } = string.Empty;
+
+        /// <summary>Number of base types between the exception type and <c>object</c>; used to run more-derived exception types first.</summary>
+        public int ExceptionDepth { get; set; }
+
+        public int Order { get; set; }
+
+        public string SortFilePath { get; set; } = string.Empty;
+
+        public int SortSpanStart { get; set; }
+
+        public Location Location { get; set; } = Location.None;
+    }
+
+    private sealed class ExceptionActionCandidate
+    {
+        public ExceptionActionInfo? ExceptionAction { get; set; }
 
         public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
     }

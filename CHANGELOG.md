@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.11.0] - 2026-09-16
+
+### Added
+- **Exception actions** — matching MediatR's `IRequestExceptionAction<TRequest, TException>`. Declare a public, open generic class with exactly one type parameter (`TCommand`) implementing `IExceptionAction<TCommand, TException>` for one fixed, concrete exception type, mark it `[ExceptionAction(Order = N)]`, and AutoDispatch calls `ExecuteAsync` as a side-effect-only observer whenever that exception type is thrown — it can never suppress the exception or supply a fallback response, unlike `[ExceptionHandler]`
+- Actions and handlers for the same exception type share the same generated `catch` block; all matching actions run first (in `Order`), then matching handlers run, mirroring MediatR's pipeline ordering where exception actions always fire before exception handlers get a chance to short-circuit
+- Actions run even when no `[ExceptionHandler]` is registered at all for the exception type — the exception is rethrown afterward via `throw;`, preserving the original stack trace
+- Most-derived-exception-type-first catch ordering is now computed across both actions and handlers together, so mixing the two for overlapping exception hierarchies still produces valid, correctly-ordered C#
+- AD018 (Error): `[ExceptionAction]` type is not a public, non-abstract open generic class with exactly one type parameter
+- AD019 (Error): `[ExceptionAction]` type does not implement `IExceptionAction<TCommand, TException>` for one fixed exception type
+- AD020 (Error): `[ExceptionAction]` type does not expose a valid public `ExecuteAsync` method
+- `AddAutoDispatch()` now also registers `[ExceptionAction]` open-generic types
+- README: new "Exception actions" subsection, updated diagnostics table (AD018-020), and feature bullets
+- 8 new tests (codegen, DI registration, runtime always-runs/does-not-suppress behavior, and all three diagnostics); 104/104 passing solution-wide
+
 ## [1.10.0] - 2026-09-16
 
 ### Added

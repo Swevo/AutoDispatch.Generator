@@ -2264,5 +2264,246 @@ public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHa
 
         Assert.Contains(diagnostics, d => d.Id == "AD017" && d.Severity == DiagnosticSeverity.Error);
     }
+
+    // ---- Exception actions ----
+
+    [Fact]
+    public void ExceptionActionAttribute_GeneratedInAttributesFile()
+    {
+        var src = RunGenerator(string.Empty, out _)["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("ExceptionActionAttribute", src);
+        Assert.Contains("IExceptionAction", src);
+    }
+
+    [Fact]
+    public void ExceptionAction_GeneratesTryCatchWithExecuteAsyncCall()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionAction]
+public sealed class LoggingExceptionAction<TCommand> : IExceptionAction<TCommand, ValidationException>
+{
+    public Task ExecuteAsync(TCommand command, ValidationException exception, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("catch (global::ValidationException ex)", src);
+        Assert.Contains("LoggingExceptionAction<", src);
+        Assert.Contains(".ExecuteAsync(command, ex, ct)", src);
+    }
+
+    [Fact]
+    public void ExceptionAction_RegisteredInDI()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionAction]
+public sealed class LoggingExceptionAction<TCommand> : IExceptionAction<TCommand, ValidationException>
+{
+    public Task ExecuteAsync(TCommand command, ValidationException exception, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped(typeof(global::LoggingExceptionAction<>));", src);
+    }
+
+    [Fact]
+    public async Task ExceptionAction_Runtime_RunsBeforeHandlerAndDoesNotSuppress()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId
+{
+    public string Value { get; }
+    public OrderId(string value) => Value = value;
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+        => throw new ValidationException();
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionAction]
+public sealed class LoggingExceptionAction<TCommand> : IExceptionAction<TCommand, ValidationException>
+{
+    public Task ExecuteAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""action"");
+        return Task.CompletedTask;
+    }
+}
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handler"");
+        return Task.FromResult(ExceptionHandlerResult<TResult>.Handled((TResult)(object)new OrderId(""fallback"")));
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var result = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+
+        Assert.Equal(new[] { "action", "handler" }, GetRecorderEntries(compiled.Assembly));
+        var valueProperty = result!.GetType().GetProperty("Value")!;
+        Assert.Equal("fallback", valueProperty.GetValue(result));
+    }
+
+    [Fact]
+    public async Task ExceptionAction_Runtime_AlwaysRunsEvenWithNoHandler()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+        => throw new ValidationException();
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionAction]
+public sealed class LoggingExceptionAction<TCommand> : IExceptionAction<TCommand, ValidationException>
+{
+    public Task ExecuteAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""action"");
+        return Task.CompletedTask;
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var dispatcherType = compiled.Assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var dispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+        var commandType = compiled.Assembly.GetType("CreateOrderCommand", throwOnError: true)!;
+        var sendAsync = dispatcherType.GetMethod("SendAsync", BindingFlags.Instance | BindingFlags.Public)!;
+
+        Exception? thrown = null;
+        try
+        {
+            var task = (Task)sendAsync.Invoke(dispatcher, new object[] { Activator.CreateInstance(commandType)!, CancellationToken.None })!;
+            await task;
+        }
+        catch (Exception ex)
+        {
+            thrown = ex;
+        }
+
+        Assert.NotNull(thrown);
+        Assert.Equal(new[] { "action" }, GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public void Diagnostic_AD018_ExceptionActionMustBeOpenGeneric()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionAction]
+public sealed class LoggingExceptionAction : IExceptionAction<object, ValidationException>
+{
+    public Task ExecuteAsync(object command, ValidationException exception, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD018" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD019_ExceptionActionMustImplementInterfaceWithFixedException()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[ExceptionAction]
+public sealed class NotAnAction<TCommand>
+{
+    public Task ExecuteAsync(TCommand command, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD019" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD020_ExceptionActionMustExposePublicExecuteAsync()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionAction]
+public sealed class LoggingExceptionAction<TCommand> : IExceptionAction<TCommand, ValidationException>
+{
+    Task IExceptionAction<TCommand, ValidationException>.ExecuteAsync(TCommand command, ValidationException exception, CancellationToken ct)
+        => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD020" && d.Severity == DiagnosticSeverity.Error);
+    }
 }
 
