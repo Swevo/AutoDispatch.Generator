@@ -320,7 +320,9 @@ falls back to its normal dispatch (simple expression-bodied if no other pipeline
 with no `AuditBehavior` reference at all, so it never pays for a pipeline it doesn't use.
 Constraint checking supports named interface/base-class constraints (the common case — marker
 interfaces like `IAudited`); a generic constraint type (e.g. `IMarker<T>`) isn't resolved yet and
-is treated as always-satisfied rather than silently dropping the behavior.
+is treated as always-satisfied rather than silently dropping the behavior. If a constraint never
+matches any registered command/query at all — typically a typo — AutoDispatch reports `AD027` so
+the mistake doesn't fail silently.
 
 ## Notifications (publish/subscribe)
 
@@ -628,6 +630,7 @@ Conventions:
 | AD024 | Error | `[PostProcessor]` type is not a public, non-abstract open generic class with exactly two type parameters |
 | AD025 | Error | `[PostProcessor]` type does not implement `IPostProcessor<TCommand, TResult>` |
 | AD026 | Error | `[PostProcessor]` type does not expose a valid public `ProcessAsync` method |
+| AD027 | Warning | A constrained `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]`'s constraint doesn't match any registered command/query — it will never run |
 
 ### AD001
 

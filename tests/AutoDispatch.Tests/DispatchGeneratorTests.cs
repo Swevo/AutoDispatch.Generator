@@ -2949,5 +2949,69 @@ public sealed class LoggingPostProcessor<TCommand, TResult> : IPostProcessor<TCo
 
         Assert.Contains(diagnostics, d => d.Id == "AD026" && d.Severity == DiagnosticSeverity.Error);
     }
+
+    [Fact]
+    public void Diagnostic_AD027_ConstrainedBehaviorMatchingNoCommand_ReportsWarning()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public interface IAudited { }
+
+// No command in this compilation implements IAudited.
+public sealed class PlainCommand { }
+
+[Handler]
+public sealed class PlainHandler
+{
+    public Task<int> HandleAsync(PlainCommand cmd, CancellationToken ct = default) => Task.FromResult(1);
+}
+
+[Behavior(Order = 0)]
+public sealed class AuditBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+    where TCommand : IAudited
+{
+    public Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}", out var diagnostics);
+
+        var warning = Assert.Single(diagnostics, d => d.Id == "AD027");
+        Assert.Equal(DiagnosticSeverity.Warning, warning.Severity);
+        Assert.Contains("AuditBehavior", warning.GetMessage());
+        Assert.Contains("IAudited", warning.GetMessage());
+
+        // Since AuditBehavior never matches, PlainCommand's SendAsync should stay unwrapped.
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.DoesNotContain("AuditBehavior<", src);
+    }
+
+    [Fact]
+    public void Diagnostic_AD027_ConstrainedBehaviorMatchingSomeCommand_NoWarning()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public interface IAudited { }
+
+public sealed class AuditedCommand : IAudited { }
+
+[Handler]
+public sealed class AuditedHandler
+{
+    public Task<int> HandleAsync(AuditedCommand cmd, CancellationToken ct = default) => Task.FromResult(1);
+}
+
+[Behavior(Order = 0)]
+public sealed class AuditBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+    where TCommand : IAudited
+{
+    public Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Id == "AD027");
+    }
 }
 

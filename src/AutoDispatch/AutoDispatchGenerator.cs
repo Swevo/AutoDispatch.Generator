@@ -487,6 +487,14 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD027 = new(
+        id: "AD027",
+        title: "Constrained behavior/processor never matches any registered command",
+        messageFormat: "'{0}' constrains its type parameter to {1}, but no registered command, query, or handler in this compilation satisfies that constraint — it will never run",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -1193,6 +1201,8 @@ namespace AutoDispatch
                 .ToArray();
         }
 
+        ReportUnmatchedConstraints(context, compilation, behaviors, preProcessors, postProcessors, streamBehaviors, dispatchMethods, streamMethods);
+
         if (dispatchMethods.Length == 0 && notificationGroups.Length == 0 && streamMethods.Length == 0)
         {
             return;
@@ -1857,6 +1867,86 @@ namespace AutoDispatch
 
         return false;
     }
+
+    /// <summary>
+    /// Reports AD027 for any constrained <c>[Behavior]</c>/<c>[PreProcessor]</c>/<c>[PostProcessor]</c>/
+    /// <c>[StreamBehavior]</c> whose constraint doesn't match any command/query actually registered
+    /// in this compilation — it would otherwise be generated (registered for DI) but never woven
+    /// into any pipeline, which usually means a typo'd or overly-narrow constraint.
+    /// </summary>
+    private static void ReportUnmatchedConstraints(
+        SourceProductionContext context,
+        Compilation compilation,
+        IReadOnlyList<BehaviorInfo> behaviors,
+        IReadOnlyList<PreProcessorInfo> preProcessors,
+        IReadOnlyList<PostProcessorInfo> postProcessors,
+        IReadOnlyList<StreamBehaviorInfo> streamBehaviors,
+        IReadOnlyList<DispatchMethodInfo> dispatchMethods,
+        IReadOnlyList<StreamMethodInfo> streamMethods)
+    {
+        foreach (var b in behaviors)
+        {
+            if (b.CommandConstraintTypeFqns.IsDefaultOrEmpty)
+            {
+                continue;
+            }
+
+            if (dispatchMethods.Any(m => CommandSatisfiesConstraints(compilation, m.CommandTypeFqn, b.CommandConstraintTypeFqns)))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(AD027, b.Location, GetShortTypeName(b.UnboundTypeFqn), DescribeConstraints(b.CommandConstraintTypeFqns)));
+        }
+
+        foreach (var p in preProcessors)
+        {
+            if (p.CommandConstraintTypeFqns.IsDefaultOrEmpty)
+            {
+                continue;
+            }
+
+            if (dispatchMethods.Any(m => CommandSatisfiesConstraints(compilation, m.CommandTypeFqn, p.CommandConstraintTypeFqns)))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(AD027, p.Location, GetShortTypeName(p.UnboundTypeFqn), DescribeConstraints(p.CommandConstraintTypeFqns)));
+        }
+
+        foreach (var p in postProcessors)
+        {
+            if (p.CommandConstraintTypeFqns.IsDefaultOrEmpty)
+            {
+                continue;
+            }
+
+            if (dispatchMethods.Any(m => CommandSatisfiesConstraints(compilation, m.CommandTypeFqn, p.CommandConstraintTypeFqns)))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(AD027, p.Location, GetShortTypeName(p.UnboundTypeFqn), DescribeConstraints(p.CommandConstraintTypeFqns)));
+        }
+
+        foreach (var b in streamBehaviors)
+        {
+            if (b.QueryConstraintTypeFqns.IsDefaultOrEmpty)
+            {
+                continue;
+            }
+
+            if (streamMethods.Any(m => CommandSatisfiesConstraints(compilation, m.QueryTypeFqn, b.QueryConstraintTypeFqns)))
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(AD027, b.Location, GetShortTypeName(b.UnboundTypeFqn), DescribeConstraints(b.QueryConstraintTypeFqns)));
+        }
+    }
+
+    private static string DescribeConstraints(ImmutableArray<string> constraintTypeFqns) =>
+        string.Join(" & ", constraintTypeFqns.Select(GetShortTypeName));
 
     private static string GetDispatchMethodName(DispatchMethodInfo method) =>
         method.IsAsync ? "SendAsync" : "Send";

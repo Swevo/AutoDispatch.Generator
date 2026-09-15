@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.1] - 2026-09-15
+
+### Added
+- **AD027 (Warning)**: a constrained `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]`'s named-type constraint (e.g. `where TCommand : IAudited`) doesn't match any command/query registered in the compilation, so it will never actually run — usually a typo'd or overly-narrow constraint. Reported at the behavior/processor's declaration.
+- README: new AD027 row in the diagnostics table, cross-referenced from the "Constrained (scoped) behaviors" section
+- 2 new tests (constraint matching nothing → warning fires and the command's dispatch stays unwrapped; constraint matching at least one command → no warning); 120/120 passing solution-wide
+
 ## [1.13.0] - 2026-09-15
 
 ### Added
