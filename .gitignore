@@ -5,3 +5,5 @@ nupkgs/
 test-results/
 *.nupkg
 *.snupkg
+
+BenchmarkDotNet.Artifacts/

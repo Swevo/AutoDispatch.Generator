@@ -482,16 +482,21 @@ or `OrderCreatedNotification.cs` with the notification record and `[Notification
 
 ### Benchmarks
 
-[BenchmarkDotNet results](benchmarks/AutoDispatch.Benchmarks/README.md) for a single no-op
-handler, comparing the generated `IDispatcher` against MediatR's `IMediator`:
+[BenchmarkDotNet results](benchmarks/AutoDispatch.Benchmarks/README.md) comparing the generated
+`IDispatcher` against MediatR's `IMediator`, for a single no-op command handler and for a
+notification fanned out to two no-op handlers:
 
-| Method                 | Mean     | Ratio | Allocated | Alloc Ratio |
-|----------------------- |---------:|------:|----------:|------------:|
-| AutoDispatch_SendAsync | 23.42 ns |  1.00 |      96 B |        1.00 |
-| MediatR_Send           | 89.13 ns |  3.85 |     288 B |        3.00 |
+| Method                    | Mean      | Ratio | Allocated | Alloc Ratio |
+|-------------------------- |----------:|------:|----------:|------------:|
+| AutoDispatch_SendAsync    |  17.31 ns |  1.00 |      96 B |        1.00 |
+| MediatR_Send              |  68.59 ns |  3.96 |     288 B |        3.00 |
+| AutoDispatch_PublishAsync |  29.94 ns |  1.73 |      24 B |        0.25 |
+| MediatR_Publish           | 115.25 ns |  6.66 |     464 B |        4.83 |
 
-**~3.8x faster, 3x fewer allocations** — no reflection-based handler lookup, no runtime-built
-pipeline. Run it yourself with `dotnet run -c Release` in `benchmarks/AutoDispatch.Benchmarks`.
+**`SendAsync` is ~4x faster, 3x fewer allocations. `PublishAsync` fanning out to two handlers is
+~3.9x faster and allocates ~19x less** — no reflection-based handler lookup, no runtime-built
+pipeline or publisher. Run it yourself with `dotnet run -c Release` in
+`benchmarks/AutoDispatch.Benchmarks`.
 
 ## Migrating from MediatR
 

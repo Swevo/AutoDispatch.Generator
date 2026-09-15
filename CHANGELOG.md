@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Publish benchmark** — `AutoDispatch.Benchmarks` now also compares `PublishAsync`/`Publish` fanning a notification out to two no-op handlers: AutoDispatch is ~3.9x faster than MediatR and allocates ~19x less (24 B vs 464 B) for the same two-handler fan-out. README and benchmark results updated with real numbers.
 - **`autodispatch-notification` item template** — `AutoDispatch.Templates` (bumped to 1.1.0) now scaffolds a notification record + `[NotificationHandler]` class via `dotnet new autodispatch-notification -n OrderCreated`, matching the existing `autodispatch-handler` template for commands
 
 ## [1.6.1] - 2026-09-15
