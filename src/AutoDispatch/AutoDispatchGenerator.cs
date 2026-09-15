@@ -99,6 +99,28 @@ namespace AutoDispatch
             System.Func<System.Threading.Tasks.Task<TResult>> next,
             System.Threading.CancellationToken ct = default);
     }
+
+    /// <summary>
+    /// Marks a class as a pipeline behavior for streaming queries. Declare a public, open
+    /// generic class with exactly two type parameters implementing
+    /// <see cref=""IStreamPipelineBehavior{TQuery, TResult}""/> — AutoDispatch closes it over
+    /// every streaming query's <c>&lt;TQuery, TResult&gt;</c> pair and wraps the generated
+    /// <c>StreamAsync</c> method with it, in <see cref=""Order""/> order (ascending, outermost
+    /// first; ties broken by declaration order).
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class StreamBehaviorAttribute : Attribute
+    {
+        public int Order { get; set; } = 0;
+    }
+
+    public interface IStreamPipelineBehavior<TQuery, TResult>
+    {
+        System.Collections.Generic.IAsyncEnumerable<TResult> HandleAsync(
+            TQuery query,
+            System.Func<System.Collections.Generic.IAsyncEnumerable<TResult>> next,
+            System.Threading.CancellationToken ct = default);
+    }
 }
 ";
 
@@ -190,6 +212,30 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD012 = new(
+        id: "AD012",
+        title: "Stream behavior must be an open generic class",
+        messageFormat: "[StreamBehavior] on '{0}' must be a public, non-abstract class with exactly two type parameters so AutoDispatch can close it as `<TQuery, TResult>`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD013 = new(
+        id: "AD013",
+        title: "Stream behavior must implement IStreamPipelineBehavior",
+        messageFormat: "[StreamBehavior] on '{0}' must implement `AutoDispatch.IStreamPipelineBehavior<TQuery, TResult>` using its declared type parameters",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD014 = new(
+        id: "AD014",
+        title: "Stream behavior has an invalid HandleAsync signature",
+        messageFormat: "[StreamBehavior] on '{0}' must declare `public IAsyncEnumerable<TResult> HandleAsync(TQuery query, Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default)`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -213,6 +259,15 @@ namespace AutoDispatch
             .Select(static (b, _) => b!)
             .Collect();
 
+        var streamBehaviors = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.StreamBehaviorAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax,
+                transform: static (ctx, ct) => TransformStreamBehavior(ctx, ct))
+            .Where(static b => b is not null)
+            .Select(static (b, _) => b!)
+            .Collect();
+
         var notificationHandlers = context.SyntaxProvider
             .ForAttributeWithMetadataName(
                 "AutoDispatch.NotificationHandlerAttribute",
@@ -231,13 +286,13 @@ namespace AutoDispatch
             .Select(static (info, _) => info!)
             .Collect();
 
-        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers);
+        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var (((handlersTuple, behaviorList), notificationList), streamList) = tuple;
+            var ((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList) = tuple;
             var ((h1, h2), h3) = handlersTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList);
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList);
         });
     }
 
@@ -550,7 +605,8 @@ namespace AutoDispatch
         ImmutableArray<HandlerInfo> handlers,
         ImmutableArray<BehaviorCandidate> behaviorCandidates,
         ImmutableArray<NotificationHandlerInfo> notificationHandlers,
-        ImmutableArray<StreamHandlerInfo> streamHandlers)
+        ImmutableArray<StreamHandlerInfo> streamHandlers,
+        ImmutableArray<StreamBehaviorCandidate> streamBehaviorCandidates)
     {
         var behaviors = new List<BehaviorInfo>();
         var seenBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -567,6 +623,23 @@ namespace AutoDispatch
             }
 
             behaviors.Add(candidate.Behavior);
+        }
+
+        var streamBehaviors = new List<StreamBehaviorInfo>();
+        var seenStreamBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in streamBehaviorCandidates)
+        {
+            foreach (var diagnostic in candidate.Diagnostics)
+            {
+                context.ReportDiagnostic(diagnostic);
+            }
+
+            if (candidate.Behavior is null || !seenStreamBehaviorTypes.Add(candidate.Behavior.UnboundTypeFqn))
+            {
+                continue;
+            }
+
+            streamBehaviors.Add(candidate.Behavior);
         }
 
         var registrations = new Dictionary<string, string>(StringComparer.Ordinal); // fqn → lifetime method
@@ -756,11 +829,11 @@ namespace AutoDispatch
             return;
         }
 
-        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods));
-        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors));
+        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors));
+        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, streamBehaviors));
     }
 
-    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods)
+    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors)
     {
         var sortedBehaviors = behaviors
             .OrderBy(static b => b.Order)
@@ -769,6 +842,14 @@ namespace AutoDispatch
             .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
             .ToArray();
         var hasBehaviors = sortedBehaviors.Length > 0;
+
+        var sortedStreamBehaviors = streamBehaviors
+            .OrderBy(static b => b.Order)
+            .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static b => b.SortSpanStart)
+            .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+        var hasStreamBehaviors = sortedStreamBehaviors.Length > 0;
 
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -928,24 +1009,62 @@ namespace AutoDispatch
         foreach (var method in streamMethods)
         {
             // Streaming queries are request/response like Send — exactly one handler per query
-            // type. The generated method delegates directly to the handler's async stream with
-            // no buffering; there is no pipeline-behavior support for streams in this version.
+            // type. With no [StreamBehavior]s registered, the generated method delegates
+            // directly to the handler's async stream with no buffering. With one or more
+            // [StreamBehavior]s, the generated method builds a lazy pipeline of nested
+            // Func<IAsyncEnumerable<T>> calls, matching the command pipeline's semantics but
+            // without Task-wrapping (HandleAsync returns the enumerable directly; only
+            // enumerating it awaits anything).
             AppendDocComment(sb, method.DocCommentXml, "        ");
-            sb.Append("        public global::System.Collections.Generic.IAsyncEnumerable<");
-            sb.Append(method.ResultTypeFqn);
-            sb.Append("> StreamAsync(");
-            sb.Append(method.QueryTypeFqn);
-            sb.AppendLine(" query, global::System.Threading.CancellationToken ct = default)");
-            sb.Append("            => this._sp.GetRequiredService<");
-            sb.Append(method.HandlerTypeFqn);
-            sb.Append(">().HandleAsync(query");
-            if (method.HasCancellationTokenParameter)
-            {
-                sb.Append(", ct");
-            }
 
-            sb.AppendLine(");");
-            sb.AppendLine();
+            if (!hasStreamBehaviors)
+            {
+                sb.Append("        public global::System.Collections.Generic.IAsyncEnumerable<");
+                sb.Append(method.ResultTypeFqn);
+                sb.Append("> StreamAsync(");
+                sb.Append(method.QueryTypeFqn);
+                sb.AppendLine(" query, global::System.Threading.CancellationToken ct = default)");
+                sb.Append("            => this._sp.GetRequiredService<");
+                sb.Append(method.HandlerTypeFqn);
+                sb.Append(">().HandleAsync(query");
+                if (method.HasCancellationTokenParameter)
+                {
+                    sb.Append(", ct");
+                }
+
+                sb.AppendLine(");");
+                sb.AppendLine();
+            }
+            else
+            {
+                var handlerShortName = GetShortTypeName(method.HandlerTypeFqn);
+                var pipelineOrder = string.Join(" -> ", sortedStreamBehaviors.Select(static b => GetShortTypeName(b.UnboundTypeFqn)));
+                var pipelineType = $"global::System.Func<global::System.Collections.Generic.IAsyncEnumerable<{method.ResultTypeFqn}>>";
+
+                sb.AppendLine($"        // Stream pipeline: {pipelineOrder} -> {handlerShortName}.HandleAsync");
+                sb.Append("        public global::System.Collections.Generic.IAsyncEnumerable<");
+                sb.Append(method.ResultTypeFqn);
+                sb.Append("> StreamAsync(");
+                sb.Append(method.QueryTypeFqn);
+                sb.AppendLine(" query, global::System.Threading.CancellationToken ct = default)");
+                sb.AppendLine("        {");
+                sb.Append($"            {pipelineType} pipeline = () => this._sp.GetRequiredService<{method.HandlerTypeFqn}>().HandleAsync(query");
+                sb.Append(method.HasCancellationTokenParameter ? ", ct" : string.Empty);
+                sb.AppendLine(");");
+
+                for (var i = sortedStreamBehaviors.Length - 1; i >= 0; i--)
+                {
+                    var b = sortedStreamBehaviors[i];
+                    var behaviorTypeFqn = b.UnboundTypeFqn.Replace("<,>", $"<{method.QueryTypeFqn}, {method.ResultTypeFqn}>");
+                    sb.AppendLine($"            var _sb{i} = this._sp.GetRequiredService<{behaviorTypeFqn}>();");
+                    sb.AppendLine($"            var _sp{i} = pipeline;");
+                    sb.AppendLine($"            pipeline = () => _sb{i}.HandleAsync(query, _sp{i}, ct);");
+                }
+
+                sb.AppendLine("            return pipeline();");
+                sb.AppendLine("        }");
+                sb.AppendLine();
+            }
         }
 
         sb.AppendLine("    }");
@@ -953,7 +1072,7 @@ namespace AutoDispatch
         return sb.ToString();
     }
 
-    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors)
+    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors)
     {
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -978,6 +1097,11 @@ namespace AutoDispatch
         }
 
         foreach (var behavior in behaviors.OrderBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal))
+        {
+            sb.AppendLine($"            services.AddScoped(typeof({behavior.UnboundTypeFqn}));");
+        }
+
+        foreach (var behavior in streamBehaviors.OrderBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal))
         {
             sb.AppendLine($"            services.AddScoped(typeof({behavior.UnboundTypeFqn}));");
         }
@@ -1204,6 +1328,139 @@ namespace AutoDispatch
         return false;
     }
 
+    private static StreamBehaviorCandidate? TransformStreamBehavior(GeneratorAttributeSyntaxContext context, CancellationToken ct)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return null;
+        }
+
+        var behaviorDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var location = typeSymbol.Locations.FirstOrDefault() ?? Location.None;
+
+        if (typeSymbol.TypeKind != TypeKind.Class ||
+            typeSymbol.DeclaredAccessibility != Accessibility.Public ||
+            typeSymbol.IsAbstract ||
+            typeSymbol.TypeParameters.Length != 2)
+        {
+            return new StreamBehaviorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD012,
+                    location,
+                    behaviorDisplayName))
+            };
+        }
+
+        var streamPipelineBehaviorType = context.SemanticModel.Compilation.GetTypeByMetadataName("AutoDispatch.IStreamPipelineBehavior`2");
+        var typeParameters = typeSymbol.TypeParameters;
+        var implementsStreamPipelineBehavior =
+            streamPipelineBehaviorType is not null &&
+            typeSymbol.AllInterfaces.Any(interfaceSymbol =>
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.OriginalDefinition, streamPipelineBehaviorType) &&
+                interfaceSymbol.TypeArguments.Length == 2 &&
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.TypeArguments[0], typeParameters[0]) &&
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.TypeArguments[1], typeParameters[1]));
+
+        if (!implementsStreamPipelineBehavior)
+        {
+            return new StreamBehaviorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD013,
+                    location,
+                    behaviorDisplayName))
+            };
+        }
+
+        if (!HasValidStreamBehaviorHandleAsync(typeSymbol, context.SemanticModel.Compilation))
+        {
+            return new StreamBehaviorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD014,
+                    location,
+                    behaviorDisplayName))
+            };
+        }
+
+        var order = 0;
+        foreach (var attr in context.Attributes)
+        {
+            foreach (var arg in attr.NamedArguments)
+            {
+                if (arg.Key == "Order" && arg.Value.Value is int v)
+                {
+                    order = v;
+                }
+            }
+        }
+
+        return new StreamBehaviorCandidate
+        {
+            Behavior = new StreamBehaviorInfo
+            {
+                UnboundTypeFqn = ToFullyQualified(typeSymbol.ConstructUnboundGenericType()),
+                Order = order,
+                SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
+                SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
+                Location = location
+            }
+        };
+    }
+
+    private static bool HasValidStreamBehaviorHandleAsync(INamedTypeSymbol typeSymbol, Compilation compilation)
+    {
+        var cancellationTokenType = compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
+        var asyncEnumerableType = compilation.GetTypeByMetadataName("System.Collections.Generic.IAsyncEnumerable`1");
+        var funcType = compilation.GetTypeByMetadataName("System.Func`1");
+
+        if (cancellationTokenType is null || asyncEnumerableType is null || funcType is null)
+        {
+            return false;
+        }
+
+        foreach (var method in typeSymbol.GetMembers("HandleAsync").OfType<IMethodSymbol>())
+        {
+            if (method.MethodKind != MethodKind.Ordinary ||
+                method.IsStatic ||
+                method.DeclaredAccessibility != Accessibility.Public ||
+                method.Parameters.Length != 3 ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, typeSymbol.TypeParameters[0]) ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[2].Type, cancellationTokenType))
+            {
+                continue;
+            }
+
+            if (method.ReturnType is not INamedTypeSymbol returnType ||
+                !SymbolEqualityComparer.Default.Equals(returnType.OriginalDefinition, asyncEnumerableType) ||
+                returnType.TypeArguments.Length != 1 ||
+                !SymbolEqualityComparer.Default.Equals(returnType.TypeArguments[0], typeSymbol.TypeParameters[1]))
+            {
+                continue;
+            }
+
+            if (method.Parameters[1].Type is not INamedTypeSymbol nextType ||
+                !SymbolEqualityComparer.Default.Equals(nextType.OriginalDefinition, funcType) ||
+                nextType.TypeArguments.Length != 1)
+            {
+                continue;
+            }
+
+            if (nextType.TypeArguments[0] is not INamedTypeSymbol nextResultType ||
+                !SymbolEqualityComparer.Default.Equals(nextResultType.OriginalDefinition, asyncEnumerableType) ||
+                nextResultType.TypeArguments.Length != 1 ||
+                !SymbolEqualityComparer.Default.Equals(nextResultType.TypeArguments[0], typeSymbol.TypeParameters[1]))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     private sealed class HandlerInfo
     {
         public string HandlerTypeFqn { get; set; } = string.Empty;
@@ -1258,6 +1515,26 @@ namespace AutoDispatch
     private sealed class BehaviorCandidate
     {
         public BehaviorInfo? Behavior { get; set; }
+
+        public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
+    }
+
+    private sealed class StreamBehaviorInfo
+    {
+        public string UnboundTypeFqn { get; set; } = string.Empty;
+
+        public int Order { get; set; }
+
+        public string SortFilePath { get; set; } = string.Empty;
+
+        public int SortSpanStart { get; set; }
+
+        public Location Location { get; set; } = Location.None;
+    }
+
+    private sealed class StreamBehaviorCandidate
+    {
+        public StreamBehaviorInfo? Behavior { get; set; }
 
         public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
     }

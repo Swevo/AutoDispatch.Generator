@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.8.0] - 2026-09-16
+
+### Added
+- **Stream pipeline behaviors** — closes the "no pipeline-behavior support for streams" gap noted in 1.7.0, matching MediatR's `IStreamPipelineBehavior<TRequest, TResponse>`. Declare a public, open generic class with exactly two type parameters implementing `IStreamPipelineBehavior<TQuery, TResult>` and mark it `[StreamBehavior(Order = N)]` — AutoDispatch wraps every generated `StreamAsync` call with it, in `Order` order, using a lazy chain of `Func<IAsyncEnumerable<TResult>>` (no Task-wrapping, matching the handler's own laziness)
+- AD012 (Error): `[StreamBehavior]` type is not a public, non-abstract open generic class with exactly two type parameters
+- AD013 (Error): `[StreamBehavior]` type does not implement `IStreamPipelineBehavior<TQuery, TResult>`
+- AD014 (Error): `[StreamBehavior]` type does not expose a valid public `HandleAsync` method
+- `AddAutoDispatch()` now also registers `[StreamBehavior]` open-generic types, same as `[Behavior]`
+- README: new "Stream pipeline behaviors" section, updated diagnostics table (AD012-014), updated comparison table and feature bullets
+- 10 new tests (codegen, DI registration, runtime ordering/forwarding, diagnostics); 80/80 passing solution-wide
+
 ## [1.7.0] - 2026-09-16
 
 ### Added

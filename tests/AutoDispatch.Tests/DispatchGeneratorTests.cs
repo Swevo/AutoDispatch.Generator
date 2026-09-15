@@ -1546,4 +1546,262 @@ public sealed class GetNumbersHandler
         Assert.NotNull(sendResult);
         Assert.Equal(new[] { 42 }, streamResults);
     }
+
+    [Fact]
+    public void StreamBehaviorAttribute_GeneratedInAttributesFile()
+    {
+        var sources = RunGenerator("using AutoDispatch;", out _);
+        var src = sources["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("StreamBehaviorAttribute", src);
+    }
+
+    [Fact]
+    public void IStreamPipelineBehavior_GeneratedInAttributesFile()
+    {
+        var sources = RunGenerator("using AutoDispatch;", out _);
+        var src = sources["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("IStreamPipelineBehavior", src);
+    }
+
+    [Fact]
+    public void OpenGenericStreamBehavior_WrapsStreamInPipeline()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        yield return 1;
+    }
 }
+
+[StreamBehavior(Order = 0)]
+public sealed class LoggingStreamBehavior<TQuery, TResult> : IStreamPipelineBehavior<TQuery, TResult>
+{
+    public IAsyncEnumerable<TResult> HandleAsync(TQuery query, System.Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default) => next();
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("LoggingStreamBehavior<", src);
+        Assert.Contains("Stream pipeline:", src);
+    }
+
+    [Fact]
+    public void OpenGenericStreamBehavior_RegisteredInDI()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        yield return 1;
+    }
+}
+
+[StreamBehavior(Order = 0)]
+public sealed class LoggingStreamBehavior<TQuery, TResult> : IStreamPipelineBehavior<TQuery, TResult>
+{
+    public IAsyncEnumerable<TResult> HandleAsync(TQuery query, System.Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default) => next();
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped(typeof(global::LoggingStreamBehavior<,>));", src);
+    }
+
+    [Fact]
+    public void OpenGenericStreamBehavior_NoStreamBehaviors_SimpleDispatchPreserved()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        yield return 1;
+    }
+}", out _);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.DoesNotContain("Stream pipeline:", src);
+        Assert.DoesNotContain("_sb0", src);
+    }
+
+    [Fact]
+    public async Task StreamBehavior_Runtime_SingleBehaviorWrapsHandlerAndForwardsAllItems()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handler:start"");
+        yield return 1;
+        yield return 2;
+        Recorder.Entries.Add(""handler:end"");
+    }
+}
+
+[StreamBehavior(Order = 0)]
+public sealed class LoggingStreamBehavior<TQuery, TResult> : IStreamPipelineBehavior<TQuery, TResult>
+{
+    public async IAsyncEnumerable<TResult> HandleAsync(TQuery query, System.Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""before"");
+        await foreach (var item in next())
+        {
+            yield return item;
+        }
+        Recorder.Entries.Add(""after"");
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var results = await InvokeStreamAsync(compiled.Assembly, "GetNumbersQuery");
+
+        Assert.Equal(new[] { 1, 2 }, results);
+        Assert.Equal(new[] { "before", "handler:start", "handler:end", "after" }, GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public async Task StreamBehavior_Runtime_MultipleBehaviorsFollowOrder()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class GetNumbersQuery { }
+
+[StreamHandler]
+public sealed class GetNumbersHandler
+{
+    public async IAsyncEnumerable<int> HandleAsync(GetNumbersQuery query, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handler"");
+        yield return 1;
+    }
+}
+
+[StreamBehavior(Order = 0)]
+public sealed class FirstStreamBehavior<TQuery, TResult> : IStreamPipelineBehavior<TQuery, TResult>
+{
+    public async IAsyncEnumerable<TResult> HandleAsync(TQuery query, System.Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""first:before"");
+        await foreach (var item in next())
+        {
+            yield return item;
+        }
+        Recorder.Entries.Add(""first:after"");
+    }
+}
+
+[StreamBehavior(Order = 1)]
+public sealed class SecondStreamBehavior<TQuery, TResult> : IStreamPipelineBehavior<TQuery, TResult>
+{
+    public async IAsyncEnumerable<TResult> HandleAsync(TQuery query, System.Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""second:before"");
+        await foreach (var item in next())
+        {
+            yield return item;
+        }
+        Recorder.Entries.Add(""second:after"");
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var results = await InvokeStreamAsync(compiled.Assembly, "GetNumbersQuery");
+
+        Assert.Equal(new[] { 1 }, results);
+        Assert.Equal(
+            new[] { "first:before", "second:before", "handler", "second:after", "first:after" },
+            GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public void Diagnostic_AD012_StreamBehaviorMustBeOpenGeneric()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+
+[StreamBehavior]
+public sealed class LoggingStreamBehavior
+{
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD012" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD013_StreamBehaviorMustImplementStreamPipelineInterface()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+[StreamBehavior]
+public sealed class LoggingStreamBehavior<TQuery, TResult>
+{
+    public IAsyncEnumerable<TResult> HandleAsync(TQuery query, System.Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default) => next();
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD013" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void Diagnostic_AD014_StreamBehaviorMustExposePublicHandleAsync()
+    {
+        RunGenerator(@"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+
+[StreamBehavior]
+public sealed class LoggingStreamBehavior<TQuery, TResult> : IStreamPipelineBehavior<TQuery, TResult>
+{
+    IAsyncEnumerable<TResult> IStreamPipelineBehavior<TQuery, TResult>.HandleAsync(TQuery query, System.Func<IAsyncEnumerable<TResult>> next, CancellationToken ct) => next();
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD014" && d.Severity == DiagnosticSeverity.Error);
+    }
+}
+

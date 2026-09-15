@@ -12,7 +12,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 
 - **Same mental model as MediatR** — command/query + handler + dispatcher
 - **Zero reflection** — direct generated calls, no runtime dispatch overhead
-- **Pipeline behaviors** — `[Behavior(Order = N)]` wraps all async handlers at compile time; no `IPipelineBehavior<,>` magic at runtime
+- **Pipeline behaviors** — `[Behavior(Order = N)]` wraps all async handlers at compile time, and `[StreamBehavior(Order = N)]` wraps streaming queries the same way; no `IPipelineBehavior<,>` magic at runtime
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -374,7 +374,43 @@ await foreach (var summary in dispatcher.StreamAsync(new GetOrdersQuery(customer
 - Like `[Handler]`, streaming is request/response — **exactly one** `[StreamHandler]` is allowed per query type; a second handler for the same query type reports AD010, same spirit as AD002 for commands
 - Only `HandleAsync(TQuery query, CancellationToken ct = default)` returning `IAsyncEnumerable<TResult>` is recognized; methods returning `Task`/`Task<T>` belong on a `[Handler]`, not a `[StreamHandler]`
 - `AddAutoDispatch()` registers stream handlers the same way as command/notification handlers, honoring `[StreamHandler(Lifetime = ...)]`
-- Pipeline `[Behavior]`s do not apply to `StreamAsync` in this version — streams are a direct pass-through to the handler's `IAsyncEnumerable<T>`
+- `[Behavior]` (the command pipeline) does not apply to `StreamAsync` — use `[StreamBehavior]` instead (below) to wrap streaming queries
+
+## Stream pipeline behaviors
+
+Streams get their own pipeline, matching MediatR's `IStreamPipelineBehavior<TRequest, TResponse>`.
+Declare a public, open generic class with exactly two type parameters implementing
+`IStreamPipelineBehavior<TQuery, TResult>`, and AutoDispatch wraps every generated `StreamAsync`
+call with it — in `Order` order (ascending, outermost first), same ordering rules as `[Behavior]`.
+Unlike command behaviors (which wrap a `Task<TResult>`), `next()` here returns
+`IAsyncEnumerable<TResult>` directly, so a stream behavior is typically itself an async iterator
+that forwards (or filters/transforms) items as they arrive:
+
+```csharp
+using AutoDispatch;
+using System.Collections.Generic;
+
+[StreamBehavior(Order = 0)]
+public sealed class LoggingStreamBehavior<TQuery, TResult> : IStreamPipelineBehavior<TQuery, TResult>
+{
+    public async IAsyncEnumerable<TResult> HandleAsync(
+        TQuery query,
+        Func<IAsyncEnumerable<TResult>> next,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation("Streaming {Query}", query);
+        await foreach (var item in next().WithCancellation(ct))
+        {
+            yield return item;
+        }
+    }
+}
+```
+
+With no `[StreamBehavior]`s registered, `StreamAsync` delegates directly to the handler exactly as
+before (no wrapping overhead). Once one or more are registered, AutoDispatch builds a lazy chain of
+`Func<IAsyncEnumerable<TResult>>` calls — nothing runs until the caller actually enumerates the
+result, matching the handler's own laziness.
 
 ## Diagnostics
 
@@ -391,6 +427,9 @@ await foreach (var summary in dispatcher.StreamAsync(new GetOrdersQuery(customer
 | AD009 | Warning | `[StreamHandler]` on a class with no valid `HandleAsync(TQuery, CancellationToken)` method returning `IAsyncEnumerable<TResult>` |
 | AD010 | Error | Duplicate stream handlers discovered for the same query type |
 | AD011 | Warning | Stream `HandleAsync` does not accept `CancellationToken` |
+| AD012 | Error | `[StreamBehavior]` type is not a public, non-abstract open generic class with exactly two type parameters |
+| AD013 | Error | `[StreamBehavior]` type does not implement `IStreamPipelineBehavior<TQuery, TResult>` |
+| AD014 | Error | `[StreamBehavior]` type does not expose a valid public `HandleAsync` method |
 
 ### AD001
 
@@ -457,6 +496,24 @@ Each query type must map to exactly one stream handler, just like commands.
 > `HandleAsync` on '{Handler}' for query '{Query}' is missing a `CancellationToken` parameter. Consider adding `CancellationToken ct = default` as the second parameter.`
 
 The method still works; the warning helps you preserve cancellation flow through `StreamAsync`.
+
+### AD012
+
+> `[StreamBehavior]` on '{Type}' must be a public, non-abstract class with exactly two type parameters so AutoDispatch can close it as `<TQuery, TResult>`.`
+
+Stream pipeline behaviors are resolved as closed generics at dispatch time, so `[StreamBehavior]` types must be declared as open generic classes such as `LoggingStreamBehavior<TQuery, TResult>`.
+
+### AD013
+
+> `[StreamBehavior]` on '{Type}' must implement `AutoDispatch.IStreamPipelineBehavior<TQuery, TResult>` using its declared type parameters.`
+
+Implement the generated `IStreamPipelineBehavior<TQuery, TResult>` interface directly on the behavior type.
+
+### AD014
+
+> `[StreamBehavior]` on '{Type}' must declare `public IAsyncEnumerable<TResult> HandleAsync(TQuery query, Func<IAsyncEnumerable<TResult>> next, CancellationToken ct = default)`.`
+
+Explicit interface implementations are not enough — the generated dispatcher calls the behavior's public `HandleAsync` method directly.
 
 ## XML doc comments and pipeline readability
 
@@ -547,7 +604,7 @@ Generates a ready-to-fill `CreateOrderCommand.cs` with the command record and `[
 
 | Approach | Boilerplate | Runtime dispatch | Pipeline behaviors | Notifications (publish) | Streaming queries | Compile-time safety | AOT |
 |---|---|---|---|---|---|---|---|
-| **AutoDispatch** | Low | None | Compile-time generated | ✅ (fan-out) | ✅ (`IAsyncEnumerable<T>`) | High | ✅ |
+| **AutoDispatch** | Low | None | Compile-time generated | ✅ (fan-out) | ✅ (`IAsyncEnumerable<T>` + pipeline) | High | ✅ |
 | **MediatR** | Medium | Yes | Runtime reflection | ✅ | ✅ | High | ⚠️ |
 | **Raw service calls** | Low | None | Manual | Manual | Manual | High | ✅ |
 
