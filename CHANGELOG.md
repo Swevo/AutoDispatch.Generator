@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.14.0] - 2026-09-15
+
+### Added
+- **Built-in OpenTelemetry-compatible tracing** — opt in with `AddAutoDispatch(o => o.EnableTracing = true)` to resolve `IDispatcher` as a generated `TracingDispatcher` decorator that wraps every `SendAsync`/`PublishAsync`/`StreamAsync` call in a `System.Diagnostics.Activity` from a new `"AutoDispatch"` `ActivitySource` (exposed as `AutoDispatch.AutoDispatchTelemetry.ActivitySourceName`), with no dependency on the OpenTelemetry SDK itself
+- Each activity is tagged with the short command/notification/query type name, and records `ActivityStatusCode.Error` plus an `error.type` tag (without suppressing the exception) if the call throws; streaming activities stay open for the full enumeration and record an error if any `MoveNextAsync()` call throws
+- Tracing is pay-for-play: `EnableTracing` defaults to `false` (plain `Dispatcher` registered, no decorator at all), and even when enabled, `StartActivity` returns `null` with no listener subscribed, making every `activity?.` call a no-op
+- `AddAutoDispatch()` now accepts an optional `Action<AutoDispatchOptions>` configuration delegate; existing no-argument call sites keep working unchanged
+- README: new "Tracing (OpenTelemetry-compatible)" section and a feature bullet
+- 3 new tests (generated source contains `AutoDispatchTelemetry`/`TracingDispatcher`/options wiring; runtime test asserting `TracingDispatcher` preserves results and tags a successful activity; runtime test asserting an error status is recorded and the original exception still propagates when a handler throws); 123/123 passing solution-wide
+
 ## [1.13.1] - 2026-09-15
 
 ### Added

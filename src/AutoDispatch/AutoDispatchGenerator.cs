@@ -1285,6 +1285,19 @@ namespace AutoDispatch
         sb.AppendLine();
         sb.AppendLine("namespace AutoDispatch");
         sb.AppendLine("{");
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// OpenTelemetry-compatible <see cref=\"global::System.Diagnostics.ActivitySource\"/> used by");
+        sb.AppendLine("    /// <see cref=\"TracingDispatcher\"/> when tracing is enabled via");
+        sb.AppendLine("    /// <c>AddAutoDispatch(o =&gt; o.EnableTracing = true)</c>. Subscribe an OpenTelemetry SDK to it");
+        sb.AppendLine("    /// with <c>.AddSource(AutoDispatchTelemetry.ActivitySourceName)</c>.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine("    public static class AutoDispatchTelemetry");
+        sb.AppendLine("    {");
+        sb.AppendLine("        public const string ActivitySourceName = \"AutoDispatch\";");
+        sb.AppendLine();
+        sb.AppendLine("        public static readonly global::System.Diagnostics.ActivitySource ActivitySource = new global::System.Diagnostics.ActivitySource(ActivitySourceName);");
+        sb.AppendLine("    }");
+        sb.AppendLine();
         sb.AppendLine("    public interface IDispatcher");
         sb.AppendLine("    {");
 
@@ -1678,8 +1691,160 @@ namespace AutoDispatch
         }
 
         sb.AppendLine("    }");
+        sb.AppendLine();
+        AppendTracingDispatcher(sb, methods, notificationGroups, streamMethods);
         sb.AppendLine("}");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Generates <c>TracingDispatcher</c>: an <see cref="IDispatcher"/> decorator that wraps every
+    /// Send/Publish/Stream call in an <see cref="global::System.Diagnostics.Activity"/> from the
+    /// "AutoDispatch" <see cref="global::System.Diagnostics.ActivitySource"/>. It is always generated
+    /// (so it's available for manual composition) but only wired into DI as the resolved
+    /// <c>IDispatcher</c> when a caller opts in via <c>AddAutoDispatch(o =&gt; o.EnableTracing = true)</c>.
+    /// With no listener subscribed (the default, e.g. no OpenTelemetry SDK configured),
+    /// <c>StartActivity</c> returns null and every <c>activity?.</c> call below is a no-op, so the
+    /// decorator costs nothing beyond one extra virtual dispatch when tracing isn't actually observed.
+    /// </summary>
+    private static void AppendTracingDispatcher(StringBuilder sb, IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods)
+    {
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// Tracing decorator for <see cref=\"IDispatcher\"/>. See <see cref=\"AutoDispatchTelemetry\"/>.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine("    internal sealed class TracingDispatcher : IDispatcher");
+        sb.AppendLine("    {");
+        sb.AppendLine("        private readonly global::AutoDispatch.Dispatcher _inner;");
+        sb.AppendLine();
+        sb.AppendLine("        public TracingDispatcher(global::AutoDispatch.Dispatcher inner) => _inner = inner;");
+        sb.AppendLine();
+
+        foreach (var method in methods)
+        {
+            var interfaceReturn = GetInterfaceReturnType(method);
+            var methodName = GetDispatchMethodName(method);
+            var shortCommandName = GetShortTypeName(method.CommandTypeFqn);
+
+            sb.Append("        public ");
+            if (method.IsAsync)
+            {
+                sb.Append("async ");
+            }
+
+            sb.Append(interfaceReturn);
+            sb.Append(' ');
+            sb.Append(methodName);
+            sb.Append('(');
+            sb.Append(method.CommandTypeFqn);
+            sb.Append(" command");
+            if (method.IsAsync)
+            {
+                sb.Append(", global::System.Threading.CancellationToken ct = default");
+            }
+
+            sb.AppendLine(")");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            using var activity = global::AutoDispatch.AutoDispatchTelemetry.ActivitySource.StartActivity(\"AutoDispatch.{methodName}\", global::System.Diagnostics.ActivityKind.Internal);");
+            sb.AppendLine($"            activity?.SetTag(\"autodispatch.command_type\", \"{shortCommandName}\");");
+            sb.AppendLine("            try");
+            sb.AppendLine("            {");
+            if (method.IsAsync)
+            {
+                if (method.AsyncResultTypeFqn != null)
+                {
+                    sb.AppendLine($"                return await _inner.{methodName}(command, ct).ConfigureAwait(false);");
+                }
+                else
+                {
+                    sb.AppendLine($"                await _inner.{methodName}(command, ct).ConfigureAwait(false);");
+                }
+            }
+            else
+            {
+                sb.AppendLine($"                return _inner.{methodName}(command);");
+            }
+
+            sb.AppendLine("            }");
+            sb.AppendLine("            catch (global::System.Exception ex)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                activity?.SetStatus(global::System.Diagnostics.ActivityStatusCode.Error, ex.Message);");
+            sb.AppendLine("                activity?.SetTag(\"error.type\", ex.GetType().FullName);");
+            sb.AppendLine("                throw;");
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+        }
+
+        foreach (var group in notificationGroups)
+        {
+            var shortNotificationName = GetShortTypeName(group.NotificationTypeFqn);
+
+            sb.Append("        public async global::System.Threading.Tasks.Task PublishAsync(");
+            sb.Append(group.NotificationTypeFqn);
+            sb.AppendLine(" notification, global::System.Threading.CancellationToken ct = default)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            using var activity = global::AutoDispatch.AutoDispatchTelemetry.ActivitySource.StartActivity(\"AutoDispatch.PublishAsync\", global::System.Diagnostics.ActivityKind.Internal);");
+            sb.AppendLine($"            activity?.SetTag(\"autodispatch.notification_type\", \"{shortNotificationName}\");");
+            sb.AppendLine("            try");
+            sb.AppendLine("            {");
+            sb.AppendLine("                await _inner.PublishAsync(notification, ct).ConfigureAwait(false);");
+            sb.AppendLine("            }");
+            sb.AppendLine("            catch (global::System.Exception ex)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                activity?.SetStatus(global::System.Diagnostics.ActivityStatusCode.Error, ex.Message);");
+            sb.AppendLine("                activity?.SetTag(\"error.type\", ex.GetType().FullName);");
+            sb.AppendLine("                throw;");
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+        }
+
+        foreach (var method in streamMethods)
+        {
+            var shortQueryName = GetShortTypeName(method.QueryTypeFqn);
+
+            sb.Append("        public async global::System.Collections.Generic.IAsyncEnumerable<");
+            sb.Append(method.ResultTypeFqn);
+            sb.Append("> StreamAsync(");
+            sb.Append(method.QueryTypeFqn);
+            sb.AppendLine(" query, [global::System.Runtime.CompilerServices.EnumeratorCancellation] global::System.Threading.CancellationToken ct = default)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            using var activity = global::AutoDispatch.AutoDispatchTelemetry.ActivitySource.StartActivity(\"AutoDispatch.StreamAsync\", global::System.Diagnostics.ActivityKind.Internal);");
+            sb.AppendLine($"            activity?.SetTag(\"autodispatch.query_type\", \"{shortQueryName}\");");
+            sb.AppendLine("            var enumerator = _inner.StreamAsync(query, ct).GetAsyncEnumerator(ct);");
+            sb.AppendLine("            try");
+            sb.AppendLine("            {");
+            sb.AppendLine("                while (true)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    bool moved;");
+            sb.AppendLine("                    try");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        moved = await enumerator.MoveNextAsync().ConfigureAwait(false);");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    catch (global::System.Exception ex)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        activity?.SetStatus(global::System.Diagnostics.ActivityStatusCode.Error, ex.Message);");
+            sb.AppendLine("                        activity?.SetTag(\"error.type\", ex.GetType().FullName);");
+            sb.AppendLine("                        throw;");
+            sb.AppendLine("                    }");
+            sb.AppendLine();
+            sb.AppendLine("                    if (!moved)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        break;");
+            sb.AppendLine("                    }");
+            sb.AppendLine();
+            sb.AppendLine("                    yield return enumerator.Current;");
+            sb.AppendLine("                }");
+            sb.AppendLine("            }");
+            sb.AppendLine("            finally");
+            sb.AppendLine("            {");
+            sb.AppendLine("                await enumerator.DisposeAsync().ConfigureAwait(false);");
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("    }");
     }
 
     private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors)
@@ -1691,11 +1856,27 @@ namespace AutoDispatch
         sb.AppendLine();
         sb.AppendLine("namespace AutoDispatch");
         sb.AppendLine("{");
+        sb.AppendLine("    /// <summary>Options for <c>AddAutoDispatch</c>.</summary>");
+        sb.AppendLine("    public sealed class AutoDispatchOptions");
+        sb.AppendLine("    {");
+        sb.AppendLine("        /// <summary>");
+        sb.AppendLine("        /// When <see langword=\"true\"/>, <c>IDispatcher</c> resolves to a <c>TracingDispatcher</c> that wraps");
+        sb.AppendLine("        /// every Send/Publish/Stream call in an <see cref=\"global::System.Diagnostics.Activity\"/> from the");
+        sb.AppendLine("        /// \"AutoDispatch\" <see cref=\"global::System.Diagnostics.ActivitySource\"/> (see <c>AutoDispatchTelemetry</c>).");
+        sb.AppendLine("        /// Default is <see langword=\"false\"/> — zero tracing overhead unless explicitly opted in.");
+        sb.AppendLine("        /// </summary>");
+        sb.AppendLine("        public bool EnableTracing { get; set; }");
+        sb.AppendLine("    }");
+        sb.AppendLine();
         sb.AppendLine("    public static class AutoDispatchServiceCollectionExtensions");
         sb.AppendLine("    {");
         sb.AppendLine("        public static global::Microsoft.Extensions.DependencyInjection.IServiceCollection AddAutoDispatch(");
-        sb.AppendLine("            this global::Microsoft.Extensions.DependencyInjection.IServiceCollection services)");
+        sb.AppendLine("            this global::Microsoft.Extensions.DependencyInjection.IServiceCollection services,");
+        sb.AppendLine("            global::System.Action<global::AutoDispatch.AutoDispatchOptions>? configure = null)");
         sb.AppendLine("        {");
+        sb.AppendLine("            var options = new global::AutoDispatch.AutoDispatchOptions();");
+        sb.AppendLine("            configure?.Invoke(options);");
+        sb.AppendLine();
 
         foreach (var kvp in registrations.OrderBy(k => k.Key, StringComparer.Ordinal))
         {
@@ -1736,7 +1917,17 @@ namespace AutoDispatch
             sb.AppendLine($"            services.AddScoped(typeof({processor.UnboundTypeFqn}));");
         }
 
-        sb.AppendLine("            services.AddScoped<global::AutoDispatch.IDispatcher, global::AutoDispatch.Dispatcher>();");
+        sb.AppendLine();
+        sb.AppendLine("            if (options.EnableTracing)");
+        sb.AppendLine("            {");
+        sb.AppendLine("                services.AddScoped<global::AutoDispatch.Dispatcher>();");
+        sb.AppendLine("                services.AddScoped<global::AutoDispatch.IDispatcher>(sp => new global::AutoDispatch.TracingDispatcher(sp.GetRequiredService<global::AutoDispatch.Dispatcher>()));");
+        sb.AppendLine("            }");
+        sb.AppendLine("            else");
+        sb.AppendLine("            {");
+        sb.AppendLine("                services.AddScoped<global::AutoDispatch.IDispatcher, global::AutoDispatch.Dispatcher>();");
+        sb.AppendLine("            }");
+        sb.AppendLine();
         sb.AppendLine("            return services;");
         sb.AppendLine("        }");
         sb.AppendLine("    }");

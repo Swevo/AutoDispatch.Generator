@@ -18,6 +18,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Exception actions** — `[ExceptionAction]` open generics always run as side-effect-only observers on a typed exception (logging, metrics, alerting) without suppressing it, matching MediatR's `IRequestExceptionAction<,>`
 - **Request pre/post-processors** — `[PreProcessor]`/`[PostProcessor]` open generics run unconditionally right before/after a handler executes, without writing a full `next()`-calling pipeline behavior, matching MediatR's `IRequestPreProcessor<>`/`IRequestPostProcessor<,>`
 - **Constrained (scoped) behaviors** — add a generic constraint (e.g. `where TCommand : IAudited`) to any `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]` to apply it only to matching commands, instead of every command in the compilation
+- **Built-in OpenTelemetry-compatible tracing** — opt in with `AddAutoDispatch(o => o.EnableTracing = true)` to wrap every `SendAsync`/`PublishAsync`/`StreamAsync` call in an `Activity`, with zero overhead when no listener is subscribed
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -203,6 +204,29 @@ services.AddScoped<CreateOrderHandler>();
 services.AddScoped<DeleteOrderHandler>();
 services.AddScoped<AutoDispatch.IDispatcher, AutoDispatch.Dispatcher>();
 ```
+
+## Tracing (OpenTelemetry-compatible)
+
+Every command/notification/stream dispatch can be wrapped in a `System.Diagnostics.Activity` from a generated `"AutoDispatch"` `ActivitySource`, without adding any dependency on OpenTelemetry itself:
+
+```csharp
+builder.Services.AddAutoDispatch(o => o.EnableTracing = true);
+```
+
+Then subscribe from your OpenTelemetry SDK setup as you would any other `ActivitySource`:
+
+```csharp
+builder.Services.AddOpenTelemetry().WithTracing(tracing =>
+    tracing.AddSource(AutoDispatch.AutoDispatchTelemetry.ActivitySourceName));
+```
+
+With tracing enabled, `IDispatcher` resolves to a generated `TracingDispatcher` decorator that:
+
+- Starts one `Activity` per `SendAsync`/`PublishAsync`/`StreamAsync` call (named `AutoDispatch.SendAsync`, `AutoDispatch.PublishAsync`, `AutoDispatch.StreamAsync`), tagged with the short command/notification/query type name
+- Sets `ActivityStatusCode.Error` and an `error.type` tag if the call throws, then rethrows unchanged — tracing never changes behavior or swallows exceptions
+- For streams, keeps the `Activity` open for the whole enumeration and records an error status if any `MoveNextAsync()` call throws
+
+Tracing is **opt-in and pay-for-play**: `EnableTracing` defaults to `false`, so the plain `Dispatcher` is registered and there is no decorator, no extra virtual call, and no `Activity` allocation unless you turn it on. Even when enabled, if nothing is listening to the `"AutoDispatch"` source, `ActivitySource.StartActivity(...)` returns `null` and every `activity?.` call below is a no-op — the cost is one extra method call on the hot path, not a full tracing pipeline.
 
 ## Pipeline behaviors
 

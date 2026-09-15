@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -24,6 +25,7 @@ namespace Microsoft.Extensions.DependencyInjection
     {
         public static IServiceCollection AddScoped<TService>(this IServiceCollection services) => services;
         public static IServiceCollection AddScoped<TService, TImplementation>(this IServiceCollection services) where TImplementation : TService => services;
+        public static IServiceCollection AddScoped<TService>(this IServiceCollection services, System.Func<System.IServiceProvider, TService> factory) => services;
         public static IServiceCollection AddScoped(this IServiceCollection services, System.Type serviceType) => services;
         public static IServiceCollection AddSingleton<TService>(this IServiceCollection services) => services;
         public static IServiceCollection AddSingleton<TService, TImplementation>(this IServiceCollection services) where TImplementation : TService => services;
@@ -2128,8 +2130,17 @@ public sealed class CreateOrderHandler
 }", out _);
 
         var src = sources["AutoDispatch.Dispatcher.g.cs"];
-        Assert.DoesNotContain("try", src);
-        Assert.DoesNotContain("catch (", src);
+
+        // TracingDispatcher always wraps calls in try/catch (to record Activity error status), so
+        // scope this assertion to the plain Dispatcher class, which should stay try/catch-free when
+        // there are no exception handlers.
+        var dispatcherClassStart = src.IndexOf("internal sealed class Dispatcher", StringComparison.Ordinal);
+        var tracingClassStart = src.IndexOf("internal sealed class TracingDispatcher", StringComparison.Ordinal);
+        Assert.True(dispatcherClassStart >= 0 && tracingClassStart > dispatcherClassStart);
+        var dispatcherClassSrc = src.Substring(dispatcherClassStart, tracingClassStart - dispatcherClassStart);
+
+        Assert.DoesNotContain("            try", dispatcherClassSrc);
+        Assert.DoesNotContain("catch (", dispatcherClassSrc);
     }
 
     [Fact]
@@ -3012,6 +3023,140 @@ public sealed class AuditBehavior<TCommand, TResult> : IPipelineBehavior<TComman
 }", out var diagnostics);
 
         Assert.DoesNotContain(diagnostics, d => d.Id == "AD027");
+    }
+
+    [Fact]
+    public void Tracing_GeneratesTelemetryAndTracingDispatcher()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}", out _);
+
+        var dispatcherSrc = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("public static class AutoDispatchTelemetry", dispatcherSrc);
+        Assert.Contains("public const string ActivitySourceName = \"AutoDispatch\";", dispatcherSrc);
+        Assert.Contains("internal sealed class TracingDispatcher : IDispatcher", dispatcherSrc);
+        Assert.Contains("AutoDispatchTelemetry.ActivitySource.StartActivity(\"AutoDispatch.SendAsync\"", dispatcherSrc);
+
+        var registrationSrc = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("public sealed class AutoDispatchOptions", registrationSrc);
+        Assert.Contains("EnableTracing", registrationSrc);
+        Assert.Contains("new global::AutoDispatch.TracingDispatcher(", registrationSrc);
+    }
+
+    [Fact]
+    public async Task Tracing_Runtime_WrapsSendAsyncInActivityAndPreservesResult()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId
+{
+    public string Value { get; }
+    public OrderId(string value) => Value = value;
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId(""created""));
+}";
+
+        using var compiled = CompileAssembly(source);
+        var dispatcherType = compiled.Assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var tracingDispatcherType = compiled.Assembly.GetType("AutoDispatch.TracingDispatcher", throwOnError: true)!;
+        var innerDispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+        var tracingDispatcher = Activator.CreateInstance(tracingDispatcherType, innerDispatcher)!;
+        var commandType = compiled.Assembly.GetType("CreateOrderCommand", throwOnError: true)!;
+        var sendAsync = tracingDispatcherType.GetMethod("SendAsync", BindingFlags.Instance | BindingFlags.Public)!;
+
+        var activities = new List<Activity>();
+        var listener = new ActivityListener
+        {
+            ShouldListenTo = activitySource => activitySource.Name == "AutoDispatch",
+            Sample = (ref ActivityCreationOptions<ActivityContext> options) => ActivitySamplingResult.AllData,
+            ActivityStopped = activities.Add,
+        };
+        ActivitySource.AddActivityListener(listener);
+        try
+        {
+            var task = (Task)sendAsync.Invoke(tracingDispatcher, new object[] { Activator.CreateInstance(commandType)!, CancellationToken.None })!;
+            await task;
+
+            var resultProperty = task.GetType().GetProperty("Result")!;
+            var orderId = resultProperty.GetValue(task)!;
+            Assert.Equal("created", (string)orderId.GetType().GetProperty("Value")!.GetValue(orderId)!);
+        }
+        finally
+        {
+            listener.Dispose();
+        }
+
+        var activity = Assert.Single(activities);
+        Assert.Equal("AutoDispatch.SendAsync", activity.OperationName);
+        Assert.Equal("CreateOrderCommand", activity.Tags.Single(t => t.Key == "autodispatch.command_type").Value);
+        Assert.Equal(ActivityStatusCode.Unset, activity.Status);
+    }
+
+    [Fact]
+    public async Task Tracing_Runtime_RecordsErrorStatusWhenHandlerThrows()
+    {
+        const string source = @"
+using AutoDispatch;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => throw new InvalidOperationException(""boom"");
+}";
+
+        using var compiled = CompileAssembly(source);
+        var dispatcherType = compiled.Assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var tracingDispatcherType = compiled.Assembly.GetType("AutoDispatch.TracingDispatcher", throwOnError: true)!;
+        var innerDispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+        var tracingDispatcher = Activator.CreateInstance(tracingDispatcherType, innerDispatcher)!;
+        var commandType = compiled.Assembly.GetType("CreateOrderCommand", throwOnError: true)!;
+        var sendAsync = tracingDispatcherType.GetMethod("SendAsync", BindingFlags.Instance | BindingFlags.Public)!;
+
+        var activities = new List<Activity>();
+        var listener = new ActivityListener
+        {
+            ShouldListenTo = activitySource => activitySource.Name == "AutoDispatch",
+            Sample = (ref ActivityCreationOptions<ActivityContext> options) => ActivitySamplingResult.AllData,
+            ActivityStopped = activities.Add,
+        };
+        ActivitySource.AddActivityListener(listener);
+        try
+        {
+            var task = (Task)sendAsync.Invoke(tracingDispatcher, new object[] { Activator.CreateInstance(commandType)!, CancellationToken.None })!;
+            await Assert.ThrowsAsync<InvalidOperationException>(() => task);
+        }
+        finally
+        {
+            listener.Dispose();
+        }
+
+        var activity = Assert.Single(activities);
+        Assert.Equal(ActivityStatusCode.Error, activity.Status);
     }
 }
 
