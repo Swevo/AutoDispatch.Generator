@@ -66,6 +66,18 @@ namespace AutoDispatch
         public int Order { get; set; } = 0;
     }
 
+    /// <summary>
+    /// Marks a class as a notification handler. Unlike <see cref=""HandlerAttribute""/>, many
+    /// <see cref=""NotificationHandlerAttribute""/> classes may handle the same notification type —
+    /// AutoDispatch fans a single <c>PublishAsync</c> call out to every registered handler.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class NotificationHandlerAttribute : Attribute
+    {
+        /// <summary>The DI lifetime for this handler. Defaults to Scoped.</summary>
+        public HandlerLifetime Lifetime { get; set; } = HandlerLifetime.Scoped;
+    }
+
     public interface IPipelineBehavior<TCommand, TResult>
     {
         System.Threading.Tasks.Task<TResult> HandleAsync(
@@ -124,6 +136,22 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD007 = new(
+        id: "AD007",
+        title: "Notification handler has no dispatch method",
+        messageFormat: "[NotificationHandler] on '{0}' has no `HandleAsync(TNotification, CancellationToken)` method. No publish dispatch will be generated for this handler.",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD008 = new(
+        id: "AD008",
+        title: "Notification HandleAsync missing CancellationToken",
+        messageFormat: "`HandleAsync` on '{0}' for notification '{1}' is missing a `CancellationToken` parameter. Consider adding `CancellationToken ct = default` as the second parameter.",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -147,13 +175,22 @@ namespace AutoDispatch
             .Select(static (b, _) => b!)
             .Collect();
 
-        var allInputs = handlers.Combine(behaviors);
+        var notificationHandlers = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.NotificationHandlerAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax,
+                transform: static (ctx, ct) => TransformNotificationHandler(ctx, ct))
+            .Where(static info => info is not null)
+            .Select(static (info, _) => info!)
+            .Collect();
+
+        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var (handlersTuple, behaviorList) = tuple;
+            var ((handlersTuple, behaviorList), notificationList) = tuple;
             var ((h1, h2), h3) = handlersTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList);
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList);
         });
     }
 
@@ -209,6 +246,75 @@ namespace AutoDispatch
         }
 
         return info;
+    }
+
+    private static NotificationHandlerInfo? TransformNotificationHandler(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return null;
+        }
+
+        var info = new NotificationHandlerInfo
+        {
+            HandlerTypeFqn = ToFullyQualified(typeSymbol),
+            HandlerDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
+            Location = typeSymbol.Locations.FirstOrDefault() ?? Location.None,
+            LifetimeMethod = ReadLifetimeMethod(context.Attributes)
+        };
+
+        var cancellationTokenType = context.SemanticModel.Compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
+
+        foreach (var member in typeSymbol.GetMembers("HandleAsync").OfType<IMethodSymbol>())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (member.MethodKind != MethodKind.Ordinary ||
+                member.IsStatic ||
+                member.DeclaredAccessibility != Accessibility.Public)
+            {
+                continue;
+            }
+
+            TryAddNotificationMethod(info, member, cancellationTokenType);
+        }
+
+        return info;
+    }
+
+    private static void TryAddNotificationMethod(
+        NotificationHandlerInfo handler,
+        IMethodSymbol method,
+        INamedTypeSymbol? cancellationTokenType)
+    {
+        if (method.Parameters.Length is < 1 or > 2)
+        {
+            return;
+        }
+
+        // Notification handlers return Task only — they publish, they don't produce a result.
+        if (method.ReturnType.ToDisplayString() != "System.Threading.Tasks.Task")
+        {
+            return;
+        }
+
+        if (method.Parameters.Length == 2 &&
+            (cancellationTokenType is null ||
+             !SymbolEqualityComparer.Default.Equals(method.Parameters[1].Type, cancellationTokenType)))
+        {
+            return;
+        }
+
+        handler.Methods.Add(new NotificationMethodInfo
+        {
+            NotificationTypeFqn = ToFullyQualified(method.Parameters[0].Type),
+            NotificationDisplayName = method.Parameters[0].Type.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat),
+            HandlerTypeFqn = handler.HandlerTypeFqn,
+            HandlerDisplayName = handler.HandlerDisplayName,
+            HasCancellationTokenParameter = method.Parameters.Length == 2,
+            Location = method.Locations.FirstOrDefault() ?? handler.Location,
+            DocCommentXml = GetDocCommentXml(method)
+        });
     }
 
     private static void TryAddSyncMethod(HandlerInfo handler, IMethodSymbol method)
@@ -322,7 +428,11 @@ namespace AutoDispatch
         }
     }
 
-    private static void Generate(SourceProductionContext context, ImmutableArray<HandlerInfo> handlers, ImmutableArray<BehaviorCandidate> behaviorCandidates)
+    private static void Generate(
+        SourceProductionContext context,
+        ImmutableArray<HandlerInfo> handlers,
+        ImmutableArray<BehaviorCandidate> behaviorCandidates,
+        ImmutableArray<NotificationHandlerInfo> notificationHandlers)
     {
         var behaviors = new List<BehaviorInfo>();
         var seenBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -341,90 +451,131 @@ namespace AutoDispatch
             behaviors.Add(candidate.Behavior);
         }
 
-        if (handlers.IsDefaultOrEmpty)
-        {
-            return;
-        }
-
         var registrations = new Dictionary<string, string>(StringComparer.Ordinal); // fqn → lifetime method
-        var methods = new List<DispatchMethodInfo>();
+        var dispatchMethods = Array.Empty<DispatchMethodInfo>();
 
-        foreach (var handler in handlers)
+        if (!handlers.IsDefaultOrEmpty)
         {
-            registrations[handler.HandlerTypeFqn] = handler.LifetimeMethod;
+            var methods = new List<DispatchMethodInfo>();
 
-            if (handler.Methods.Count == 0)
+            foreach (var handler in handlers)
             {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    AD001,
-                    handler.Location,
-                    handler.HandlerDisplayName));
-                continue;
-            }
+                registrations[handler.HandlerTypeFqn] = handler.LifetimeMethod;
 
-            foreach (var method in handler.Methods)
-            {
-                methods.Add(method);
-
-                if (method.IsAsync && !method.HasCancellationTokenParameter)
+                if (handler.Methods.Count == 0)
                 {
                     context.ReportDiagnostic(Diagnostic.Create(
-                        AD003,
-                        method.Location,
-                        method.HandlerDisplayName,
-                        method.CommandDisplayName));
+                        AD001,
+                        handler.Location,
+                        handler.HandlerDisplayName));
+                    continue;
+                }
+
+                foreach (var method in handler.Methods)
+                {
+                    methods.Add(method);
+
+                    if (method.IsAsync && !method.HasCancellationTokenParameter)
+                    {
+                        context.ReportDiagnostic(Diagnostic.Create(
+                            AD003,
+                            method.Location,
+                            method.HandlerDisplayName,
+                            method.CommandDisplayName));
+                    }
                 }
             }
-        }
 
-        if (methods.Count == 0)
-        {
-            return;
-        }
-
-        var duplicateCommands = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var group in methods.GroupBy(static method => method.CommandTypeFqn, StringComparer.Ordinal))
-        {
-            if (group.Count() <= 1)
+            var duplicateCommands = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var group in methods.GroupBy(static method => method.CommandTypeFqn, StringComparer.Ordinal))
             {
-                continue;
+                if (group.Count() <= 1)
+                {
+                    continue;
+                }
+
+                duplicateCommands.Add(group.Key);
+                var ordered = group
+                    .OrderBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal)
+                    .ThenBy(static method => method.MethodName, StringComparer.Ordinal)
+                    .ToArray();
+
+                var first = ordered[0];
+                for (var i = 1; i < ordered.Length; i++)
+                {
+                    var duplicate = ordered[i];
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        AD002,
+                        duplicate.Location,
+                        duplicate.CommandDisplayName,
+                        first.HandlerDisplayName,
+                        duplicate.HandlerDisplayName));
+                }
             }
 
-            duplicateCommands.Add(group.Key);
-            var ordered = group
-                .OrderBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal)
-                .ThenBy(static method => method.MethodName, StringComparer.Ordinal)
+            dispatchMethods = methods
+                .Where(method => !duplicateCommands.Contains(method.CommandTypeFqn))
+                .OrderBy(static method => method.CommandTypeFqn, StringComparer.Ordinal)
+                .ThenBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal)
                 .ToArray();
-
-            var first = ordered[0];
-            for (var i = 1; i < ordered.Length; i++)
-            {
-                var duplicate = ordered[i];
-                context.ReportDiagnostic(Diagnostic.Create(
-                    AD002,
-                    duplicate.Location,
-                    duplicate.CommandDisplayName,
-                    first.HandlerDisplayName,
-                    duplicate.HandlerDisplayName));
-            }
         }
 
-        var dispatchMethods = methods
-            .Where(method => !duplicateCommands.Contains(method.CommandTypeFqn))
-            .OrderBy(static method => method.CommandTypeFqn, StringComparer.Ordinal)
-            .ThenBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal)
-            .ToArray();
+        var notificationGroups = Array.Empty<NotificationGroup>();
 
-        if (dispatchMethods.Length == 0)
+        if (!notificationHandlers.IsDefaultOrEmpty)
+        {
+            var notificationMethods = new List<NotificationMethodInfo>();
+
+            foreach (var handler in notificationHandlers)
+            {
+                registrations[handler.HandlerTypeFqn] = handler.LifetimeMethod;
+
+                if (handler.Methods.Count == 0)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        AD007,
+                        handler.Location,
+                        handler.HandlerDisplayName));
+                    continue;
+                }
+
+                foreach (var method in handler.Methods)
+                {
+                    notificationMethods.Add(method);
+
+                    if (!method.HasCancellationTokenParameter)
+                    {
+                        context.ReportDiagnostic(Diagnostic.Create(
+                            AD008,
+                            method.Location,
+                            method.HandlerDisplayName,
+                            method.NotificationDisplayName));
+                    }
+                }
+            }
+
+            // Unlike commands, many handlers may legitimately subscribe to the same notification
+            // type — every one of them fires when PublishAsync is called, so there is no
+            // "duplicate handler" diagnostic here.
+            notificationGroups = notificationMethods
+                .GroupBy(static method => method.NotificationTypeFqn, StringComparer.Ordinal)
+                .Select(static group => new NotificationGroup(
+                    group.Key,
+                    group.OrderBy(static method => method.HandlerTypeFqn, StringComparer.Ordinal).ToArray()))
+                .OrderBy(static group => group.NotificationTypeFqn, StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        if (dispatchMethods.Length == 0 && notificationGroups.Length == 0)
         {
             return;
         }
 
-        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors));
+        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups));
         context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors));
     }
 
-    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors)
+    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups)
     {
         var sortedBehaviors = behaviors
             .OrderBy(static b => b.Order)
@@ -463,6 +614,13 @@ namespace AutoDispatch
             }
 
             sb.AppendLine(");");
+        }
+
+        foreach (var group in notificationGroups)
+        {
+            sb.Append("        global::System.Threading.Tasks.Task PublishAsync(");
+            sb.Append(group.NotificationTypeFqn);
+            sb.AppendLine(" notification, global::System.Threading.CancellationToken ct = default);");
         }
 
         sb.AppendLine("    }");
@@ -543,6 +701,33 @@ namespace AutoDispatch
                 sb.AppendLine("        }");
                 sb.AppendLine();
             }
+        }
+
+        foreach (var group in notificationGroups)
+        {
+            // Fan-out publish: every registered handler for this notification type runs in
+            // deterministic (handler-type-name) order. A handler throwing stops the remaining
+            // handlers from running, matching MediatR's default ForeachAwaitPublisher behavior.
+            var handlerNames = string.Join(", ", group.Methods.Select(static m => GetShortTypeName(m.HandlerTypeFqn)));
+            sb.AppendLine($"        // Publish fan-out: {handlerNames}");
+            sb.AppendLine($"        public async global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
+            sb.AppendLine("        {");
+
+            foreach (var method in group.Methods)
+            {
+                sb.Append("            await this._sp.GetRequiredService<");
+                sb.Append(method.HandlerTypeFqn);
+                sb.Append(">().HandleAsync(notification");
+                if (method.HasCancellationTokenParameter)
+                {
+                    sb.Append(", ct");
+                }
+
+                sb.AppendLine(").ConfigureAwait(false);");
+            }
+
+            sb.AppendLine("        }");
+            sb.AppendLine();
         }
 
         sb.AppendLine("    }");
@@ -846,5 +1031,50 @@ namespace AutoDispatch
         public BehaviorInfo? Behavior { get; set; }
 
         public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
+    }
+
+    private sealed class NotificationHandlerInfo
+    {
+        public string HandlerTypeFqn { get; set; } = string.Empty;
+
+        public string HandlerDisplayName { get; set; } = string.Empty;
+
+        public Location Location { get; set; } = Location.None;
+
+        public string LifetimeMethod { get; set; } = "AddScoped";
+
+        public List<NotificationMethodInfo> Methods { get; } = new();
+    }
+
+    private sealed class NotificationMethodInfo
+    {
+        public string NotificationTypeFqn { get; set; } = string.Empty;
+
+        public string NotificationDisplayName { get; set; } = string.Empty;
+
+        public string HandlerTypeFqn { get; set; } = string.Empty;
+
+        public string HandlerDisplayName { get; set; } = string.Empty;
+
+        public bool HasCancellationTokenParameter { get; set; }
+
+        public Location Location { get; set; } = Location.None;
+
+        public string? DocCommentXml { get; set; }
+    }
+
+    /// <summary>All the handlers subscribed to a single notification type, in the deterministic
+    /// order AutoDispatch will invoke them from the generated `PublishAsync` method.</summary>
+    private sealed class NotificationGroup
+    {
+        public NotificationGroup(string notificationTypeFqn, IReadOnlyList<NotificationMethodInfo> methods)
+        {
+            NotificationTypeFqn = notificationTypeFqn;
+            Methods = methods;
+        }
+
+        public string NotificationTypeFqn { get; }
+
+        public IReadOnlyList<NotificationMethodInfo> Methods { get; }
     }
 }

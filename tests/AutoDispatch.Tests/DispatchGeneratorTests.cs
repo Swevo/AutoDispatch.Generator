@@ -102,6 +102,16 @@ namespace Microsoft.Extensions.DependencyInjection
         return null;
     }
 
+    private static async Task InvokePublishAsync(Assembly assembly, string notificationTypeName)
+    {
+        var notificationType = assembly.GetType(notificationTypeName, throwOnError: true)!;
+        var dispatcherType = assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var dispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+        var publishAsync = dispatcherType.GetMethod("PublishAsync", BindingFlags.Instance | BindingFlags.Public)!;
+        var task = (Task)publishAsync.Invoke(dispatcher, new object[] { Activator.CreateInstance(notificationType)!, CancellationToken.None })!;
+        await task;
+    }
+
     private static IReadOnlyList<string> GetRecorderEntries(Assembly assembly)
     {
         var recorderType = assembly.GetType("Recorder", throwOnError: true)!;
@@ -1156,5 +1166,198 @@ public sealed class CreateOrderHandler
 
         var dispatcher = sources["AutoDispatch.Dispatcher.g.cs"];
         Assert.Contains("// Pipeline: LoggingBehavior -> ValidationBehavior -> CreateOrderHandler.HandleAsync -> LoggingBehavior -> ValidationBehavior", dispatcher);
+    }
+
+    // ---- Notifications / Publish ----
+
+    [Fact]
+    public void Attributes_ContainsNotificationHandlerAttribute()
+    {
+        var sources = RunGenerator(string.Empty, out _);
+        var src = sources["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("NotificationHandlerAttribute", src);
+    }
+
+    [Fact]
+    public void NotificationHandler_GeneratesPublishAsyncOnIDispatcher()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class SendEmailOnOrderCreated
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("PublishAsync(global::OrderCreated notification, global::System.Threading.CancellationToken ct = default)", src);
+    }
+
+    [Fact]
+    public void NotificationHandler_RegistersHandlerInDI()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class SendEmailOnOrderCreated
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}", out _);
+
+        var src = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped<global::SendEmailOnOrderCreated>();", src);
+    }
+
+    [Fact]
+    public void NotificationHandler_MultipleHandlersForSameNotification_DoesNotReportDuplicateDiagnostic()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class SendEmailOnOrderCreated
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+[NotificationHandler]
+public sealed class UpdateAnalyticsOnOrderCreated
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Id == "AD002");
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("global::SendEmailOnOrderCreated", src);
+        Assert.Contains("global::UpdateAnalyticsOnOrderCreated", src);
+    }
+
+    [Fact]
+    public void NotificationHandler_NoValidHandleAsync_ReportsAD007()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+[NotificationHandler]
+public sealed class BrokenHandler
+{
+    public void HandleAsync(object notification) { }
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD007");
+        Assert.DoesNotContain(sources.Keys, k => k == "AutoDispatch.Dispatcher.g.cs" && sources[k].Contains("PublishAsync"));
+    }
+
+    [Fact]
+    public void NotificationHandler_MissingCancellationToken_ReportsAD008()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading.Tasks;
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class SendEmailOnOrderCreated
+{
+    public Task HandleAsync(OrderCreated notification) => Task.CompletedTask;
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD008");
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("PublishAsync(global::OrderCreated notification, global::System.Threading.CancellationToken ct = default)", src);
+        Assert.Contains("HandleAsync(notification).ConfigureAwait(false);", src);
+    }
+
+    [Fact]
+    public async Task NotificationHandler_Runtime_FansOutToAllHandlers()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class EmailHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""email"");
+        return Task.CompletedTask;
+    }
+}
+
+[NotificationHandler]
+public sealed class AnalyticsHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""analytics"");
+        return Task.CompletedTask;
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+
+        Assert.Equal(new[] { "analytics", "email" }, GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public async Task NotificationHandler_Runtime_CoexistsWithCommandHandlers()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+public sealed class OrderCreated { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<OrderId> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default) => Task.FromResult(new OrderId());
+}
+
+[NotificationHandler]
+public sealed class EmailHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}";
+
+        using var compiled = CompileAssembly(source);
+        var result = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+
+        Assert.NotNull(result);
     }
 }

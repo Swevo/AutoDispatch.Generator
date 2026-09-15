@@ -10,11 +10,11 @@
     <NoWarn>$(NoWarn);NU5017;NU5128;RS2008</NoWarn>
 
     <PackageId>AutoDispatch.Generator</PackageId>
-    <Version>1.5.0</Version>
+    <Version>1.6.0</Version>
     <Authors>Justin Bannister</Authors>
     <Copyright>Copyright (c) 2026 Justin Bannister</Copyright>
     <Description>Compile-time CQRS dispatcher for .NET using Roslyn source generators. Add [Handler] to your handler class — AutoDispatch generates a strongly-typed IDispatcher interface and Dispatcher implementation at build time. No IRequest&lt;T&gt; marker interfaces, no reflection, zero runtime overhead. Works with ASP.NET Core, Worker Services, and any Microsoft.Extensions.DependencyInjection project.</Description>
-    <PackageTags>cqrs;mediator;dispatcher;source-generator;roslyn;dotnet;aspnetcore;csharp;compile-time;zero-reflection;aot;mediatR-alternative;command-handler;query-handler</PackageTags>
+    <PackageTags>cqrs;mediator;dispatcher;source-generator;roslyn;dotnet;aspnetcore;csharp;compile-time;zero-reflection;aot;mediatR-alternative;command-handler;query-handler;notifications;pubsub;domain-events</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/Swevo/AutoDispatch.Generator</RepositoryUrl>
@@ -26,7 +26,7 @@
     <IncludeSymbols>false</IncludeSymbols>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
-    <PackageReleaseNotes>1.5.0: XML doc comments on Handle/HandleAsync methods are now forwarded to the generated IDispatcher members; generated async dispatch methods with behaviors now include a "// Pipeline: A -> B -> Handler -> B -> A" comment showing execution order; added IDE code fixes for AD001 (add HandleAsync stub) and AD003 (add CancellationToken parameter) via the companion AutoDispatch.CodeFixes assembly shipped in the same package. 1.4.0: Validated pipeline behaviors with ordered execution, declaration-order tie-breaking, and AD004/AD005/AD006 diagnostics for misconfigured behaviors. 1.3.1: Fix package icon (was showing an incorrect/placeholder image). 1.3.0: [Behavior(Order=N)] pipeline behaviors; IPipelineBehavior&lt;TCommand,TResult&gt;; Unit struct for void-async handlers; open-generic DI registration. 1.2.0: [CommandHandler]/[QueryHandler] semantic aliases. 1.1.0: HandlerLifetime (Scoped/Singleton/Transient). 1.0.0: [Handler] attribute, Handle/HandleAsync discovery, typed IDispatcher + Dispatcher generated, AddAutoDispatch() DI registration, AD001/AD002/AD003 diagnostics.</PackageReleaseNotes>
+    <PackageReleaseNotes>1.6.0: Notifications / publish-subscribe — [NotificationHandler] classes with HandleAsync(TNotification, CancellationToken) are fanned out via a new PublishAsync() method on IDispatcher; any number of handlers may subscribe to the same notification type (no duplicate-handler error, unlike commands); AD007/AD008 diagnostics. 1.5.0: XML doc comments on Handle/HandleAsync methods are now forwarded to the generated IDispatcher members; generated async dispatch methods with behaviors now include a "// Pipeline: A -> B -> Handler -> B -> A" comment showing execution order; added IDE code fixes for AD001 (add HandleAsync stub) and AD003 (add CancellationToken parameter) via the companion AutoDispatch.CodeFixes assembly shipped in the same package. 1.4.0: Validated pipeline behaviors with ordered execution, declaration-order tie-breaking, and AD004/AD005/AD006 diagnostics for misconfigured behaviors. 1.3.1: Fix package icon (was showing an incorrect/placeholder image). 1.3.0: [Behavior(Order=N)] pipeline behaviors; IPipelineBehavior&lt;TCommand,TResult&gt;; Unit struct for void-async handlers; open-generic DI registration. 1.2.0: [CommandHandler]/[QueryHandler] semantic aliases. 1.1.0: HandlerLifetime (Scoped/Singleton/Transient). 1.0.0: [Handler] attribute, Handle/HandleAsync discovery, typed IDispatcher + Dispatcher generated, AddAutoDispatch() DI registration, AD001/AD002/AD003 diagnostics.</PackageReleaseNotes>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.*" PrivateAssets="all" />

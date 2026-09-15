@@ -285,6 +285,51 @@ Behaviors can also short-circuit by returning a result without calling `next()`.
 
 Sync `T Send(...)` and `void Send(...)` methods are not wrapped. Add a pipeline when you migrate a sync handler to async, or keep it sync for zero overhead.
 
+## Notifications (publish/subscribe)
+
+`[Handler]` gives you MediatR's `Send` (exactly one handler per command). `[NotificationHandler]` gives you the other half — MediatR's `Publish`: **any number of handlers** may subscribe to the same notification type, and every one of them runs when you publish it.
+
+```csharp
+using AutoDispatch;
+
+public sealed record OrderCreated(Guid OrderId);
+
+[NotificationHandler]
+public sealed class SendConfirmationEmail
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        // ...
+        return Task.CompletedTask;
+    }
+}
+
+[NotificationHandler]
+public sealed class UpdateAnalytics
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        // ...
+        return Task.CompletedTask;
+    }
+}
+```
+
+`AddAutoDispatch()` registers both handlers automatically, and `IDispatcher` gains a matching `PublishAsync` overload:
+
+```csharp
+await dispatcher.PublishAsync(new OrderCreated(orderId), ct);
+// runs SendConfirmationEmail.HandleAsync, then UpdateAnalytics.HandleAsync
+```
+
+### Conventions
+
+- Only `HandleAsync(TNotification notification, CancellationToken ct = default)` is supported — notification handlers publish, they don't return a result, so plain `Handle` and `Task<T>`-returning methods are ignored
+- Unlike `[Handler]`, **multiple** `[NotificationHandler]` classes may handle the same notification type — there is no AD002-style "duplicate handler" error
+- Handlers run sequentially, in deterministic order (by handler type name), awaiting each one before starting the next — matching MediatR's default `ForeachAwaitPublisher` behavior. If a handler throws, remaining handlers for that publish call do not run
+- `[NotificationHandler(Lifetime = HandlerLifetime.Singleton)]` (or `Transient`) works the same way as it does on `[Handler]`
+- Pipeline `[Behavior]`s currently apply only to command/query dispatch (`Send`/`SendAsync`), not to `PublishAsync` — this may be added in a future release
+
 ## Diagnostics
 
 | Code | Severity | Description |
@@ -295,6 +340,8 @@ Sync `T Send(...)` and `void Send(...)` methods are not wrapped. Add a pipeline 
 | AD004 | Error | `[Behavior]` type is not a public, non-abstract open generic class with exactly two type parameters |
 | AD005 | Error | `[Behavior]` type does not implement `IPipelineBehavior<TCommand, TResult>` |
 | AD006 | Error | `[Behavior]` type does not expose a valid public `HandleAsync` method |
+| AD007 | Warning | `[NotificationHandler]` on a class with no valid `HandleAsync(TNotification, CancellationToken)` method |
+| AD008 | Warning | Notification `HandleAsync` does not accept `CancellationToken` |
 
 ### AD001
 
@@ -331,6 +378,18 @@ Implement the generated `IPipelineBehavior<TCommand, TResult>` interface directl
 > `[Behavior]` on '{Type}' must declare `public Task<TResult> HandleAsync(TCommand command, Func<Task<TResult>> next, CancellationToken ct = default)`.`
 
 Explicit interface implementations are not enough — the generated dispatcher calls the behavior's public `HandleAsync` method directly.
+
+### AD007
+
+> `[NotificationHandler]` on '{Type}' has no `HandleAsync(TNotification, CancellationToken)` method. No publish dispatch will be generated for this handler.`
+
+Add a valid `HandleAsync(TNotification notification, CancellationToken ct = default)` method that returns `Task`.
+
+### AD008
+
+> `HandleAsync` on '{Handler}' for notification '{Notification}' is missing a `CancellationToken` parameter. Consider adding `CancellationToken ct = default` as the second parameter.`
+
+The method still works; the warning helps you preserve cancellation flow through `PublishAsync`.
 
 ## XML doc comments and pipeline readability
 

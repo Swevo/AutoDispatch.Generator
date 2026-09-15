@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.0] - 2026-09-15
+
+### Added
+- **Notifications / publish-subscribe** — the biggest gap versus MediatR is closed. Mark a class `[NotificationHandler]` with a `Task HandleAsync(TNotification notification, CancellationToken ct = default)` method, and AutoDispatch generates a `PublishAsync(TNotification, CancellationToken)` method on `IDispatcher` that fans a single publish call out to **every** registered handler for that notification type
+- Unlike `[Handler]` commands (which require exactly one handler per command type), any number of `[NotificationHandler]` classes may subscribe to the same notification type — all of them run, in deterministic (handler-type-name) order, matching MediatR's default `ForeachAwaitPublisher` semantics
+- `AddAutoDispatch()` now also registers `[NotificationHandler]` classes with their configured `HandlerLifetime` (defaults to `Scoped`, same as commands)
+- AD007 (Warning): `[NotificationHandler]` on a class with no valid `HandleAsync(TNotification, CancellationToken)` method
+- AD008 (Warning): notification `HandleAsync` is missing a `CancellationToken` parameter
+
 ## [1.5.0] - 2026-07-28
 
 ### Added
