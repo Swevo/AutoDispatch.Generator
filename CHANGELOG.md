@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.13.0] - 2026-09-15
+
+### Added
+- **Constrained (scoped) behaviors/processors** — a `[Behavior]`, `[PreProcessor]`, `[PostProcessor]`, or `[StreamBehavior]`'s open generic type parameter may now declare a named-type constraint (e.g. `where TCommand : IAudited`), and AutoDispatch only weaves that behavior/processor into commands (or streaming queries) whose type actually satisfies the constraint — matching how MediatR users scope a registered `IPipelineBehavior<,>` to a subset of requests via a generic constraint
+- Previously, `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]` applied unconditionally to every command in the compilation; a constrained one would in fact still be closed over every command type by the generator, which meant a constraint mismatch could fail to compile with a confusing generic-constraint error instead of the constraint being honored. Constraints are now resolved and checked per command/query, so unrelated commands fall back to their normal (possibly simple expression-bodied) dispatch untouched
+- Constraint checking supports simple named interface/base-class constraints (the common case — marker interfaces like `IAudited`); generic constraint types (e.g. `IMarker<T>`) aren't resolved yet and are treated as always-satisfied (fail open) rather than silently dropping a behavior
+- No new diagnostics or attribute changes — this is a pure codegen refinement of the existing `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]` attributes
+- README: new "Constrained (scoped) behaviors" subsection
+- 2 new tests (codegen proving a constrained behavior is only woven into the matching command's `SendAsync`, and a runtime test proving it only executes for that command); 118/118 passing solution-wide
+
 ## [1.12.0] - 2026-09-15
 
 ### Added

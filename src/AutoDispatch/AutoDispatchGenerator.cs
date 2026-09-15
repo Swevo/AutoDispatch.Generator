@@ -577,15 +577,15 @@ namespace AutoDispatch
 
         var processors = preProcessors.Combine(postProcessors);
 
-        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors);
+        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors).Combine(context.CompilationProvider);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var ((((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple) = tuple;
+            var (((((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple), compilation) = tuple;
             var ((h1, h2), h3) = handlersTuple;
             var (exceptionHandlerList, exceptionActionList) = exceptionMiddlewareTuple;
             var (preProcessorList, postProcessorList) = processorsTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList);
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList, compilation);
         });
     }
 
@@ -905,7 +905,8 @@ namespace AutoDispatch
         ImmutableArray<ExceptionHandlerCandidate> exceptionHandlerCandidates,
         ImmutableArray<ExceptionActionCandidate> exceptionActionCandidates,
         ImmutableArray<PreProcessorCandidate> preProcessorCandidates,
-        ImmutableArray<PostProcessorCandidate> postProcessorCandidates)
+        ImmutableArray<PostProcessorCandidate> postProcessorCandidates,
+        Compilation compilation)
     {
         var behaviors = new List<BehaviorInfo>();
         var seenBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
@@ -1197,27 +1198,25 @@ namespace AutoDispatch
             return;
         }
 
-        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors));
+        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors, compilation));
         context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors));
     }
 
-    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors)
+    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors, Compilation compilation)
     {
-        var sortedBehaviors = behaviors
+        var allBehaviors = behaviors
             .OrderBy(static b => b.Order)
             .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
             .ThenBy(static b => b.SortSpanStart)
             .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
             .ToArray();
-        var hasBehaviors = sortedBehaviors.Length > 0;
 
-        var sortedStreamBehaviors = streamBehaviors
+        var allStreamBehaviors = streamBehaviors
             .OrderBy(static b => b.Order)
             .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
             .ThenBy(static b => b.SortSpanStart)
             .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
             .ToArray();
-        var hasStreamBehaviors = sortedStreamBehaviors.Length > 0;
 
         // Catch clauses must go most-derived-exception-type first, or the C# compiler rejects a
         // base-type catch that would make a later, more-specific catch unreachable. Handlers and
@@ -1253,21 +1252,19 @@ namespace AutoDispatch
             .ToArray();
         var hasExceptionHandlers = exceptionMiddlewareGroups.Length > 0;
 
-        var sortedPreProcessors = preProcessors
+        var allPreProcessors = preProcessors
             .OrderBy(static p => p.Order)
             .ThenBy(static p => p.SortFilePath, StringComparer.Ordinal)
             .ThenBy(static p => p.SortSpanStart)
             .ThenBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal)
             .ToArray();
-        var hasPreProcessors = sortedPreProcessors.Length > 0;
 
-        var sortedPostProcessors = postProcessors
+        var allPostProcessors = postProcessors
             .OrderBy(static p => p.Order)
             .ThenBy(static p => p.SortFilePath, StringComparer.Ordinal)
             .ThenBy(static p => p.SortSpanStart)
             .ThenBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal)
             .ToArray();
-        var hasPostProcessors = sortedPostProcessors.Length > 0;
 
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -1328,6 +1325,25 @@ namespace AutoDispatch
 
         foreach (var method in methods)
         {
+            // Behaviors/pre/post-processors with a constrained TCommand type parameter (e.g.
+            // `where TCommand : IAudited`) only apply to commands that satisfy that constraint —
+            // filtered per command here so one command's pipeline never references a behavior
+            // that couldn't actually be constructed for its type.
+            var sortedBehaviors = allBehaviors
+                .Where(b => CommandSatisfiesConstraints(compilation, method.CommandTypeFqn, b.CommandConstraintTypeFqns))
+                .ToArray();
+            var hasBehaviors = sortedBehaviors.Length > 0;
+
+            var sortedPreProcessors = allPreProcessors
+                .Where(p => CommandSatisfiesConstraints(compilation, method.CommandTypeFqn, p.CommandConstraintTypeFqns))
+                .ToArray();
+            var hasPreProcessors = sortedPreProcessors.Length > 0;
+
+            var sortedPostProcessors = allPostProcessors
+                .Where(p => CommandSatisfiesConstraints(compilation, method.CommandTypeFqn, p.CommandConstraintTypeFqns))
+                .ToArray();
+            var hasPostProcessors = sortedPostProcessors.Length > 0;
+
             if (!method.IsAsync || (!hasBehaviors && !hasExceptionHandlers && !hasPreProcessors && !hasPostProcessors))
             {
                 // Simple expression-body form (sync, or async with no behaviors/exception handlers/processors)
@@ -1596,6 +1612,11 @@ namespace AutoDispatch
             // enumerating it awaits anything).
             AppendDocComment(sb, method.DocCommentXml, "        ");
 
+            var sortedStreamBehaviors = allStreamBehaviors
+                .Where(b => CommandSatisfiesConstraints(compilation, method.QueryTypeFqn, b.QueryConstraintTypeFqns))
+                .ToArray();
+            var hasStreamBehaviors = sortedStreamBehaviors.Length > 0;
+
             if (!hasStreamBehaviors)
             {
                 sb.Append("        public global::System.Collections.Generic.IAsyncEnumerable<");
@@ -1748,6 +1769,95 @@ namespace AutoDispatch
     private static string ToFullyQualified(ITypeSymbol typeSymbol) =>
         typeSymbol.ToDisplayString(FullyQualifiedFormat);
 
+    /// <summary>
+    /// Extracts the fully-qualified names of any named-type (interface/base class) constraints
+    /// declared on a generic type parameter — e.g. <c>where TCommand : IAudited</c>. Special
+    /// constraints (<c>class</c>, <c>struct</c>, <c>new()</c>, <c>notnull</c>) are ignored since
+    /// they don't narrow which commands a behavior/processor applies to.
+    /// </summary>
+    private static ImmutableArray<string> GetNamedConstraintTypeFqns(ITypeParameterSymbol typeParameter) =>
+        typeParameter.ConstraintTypes
+            .Where(static t => t.TypeKind is TypeKind.Interface or TypeKind.Class)
+            .Select(ToFullyQualified)
+            .ToImmutableArray();
+
+    /// <summary>
+    /// Returns whether <paramref name="commandTypeFqn"/> (resolved against <paramref name="compilation"/>)
+    /// satisfies every constraint in <paramref name="constraintTypeFqns"/>, so a constrained
+    /// <c>[Behavior]</c>/<c>[PreProcessor]</c>/<c>[PostProcessor]</c>/<c>[StreamBehavior]</c> is only
+    /// applied to commands/queries that actually match its <c>where TCommand : ...</c> clause,
+    /// instead of unconditionally to every command in the compilation. Fails open (returns
+    /// <see langword="true"/>) when a type can't be resolved — e.g. a generic constraint type like
+    /// <c>IMarker&lt;T&gt;</c>, which isn't supported yet — so an unsupported constraint shape never
+    /// silently drops a behavior instead of over-applying it.
+    /// </summary>
+    private static bool CommandSatisfiesConstraints(Compilation compilation, string commandTypeFqn, ImmutableArray<string> constraintTypeFqns)
+    {
+        if (constraintTypeFqns.IsDefaultOrEmpty)
+        {
+            return true;
+        }
+
+        var commandType = ResolveNamedType(compilation, commandTypeFqn);
+        if (commandType is null)
+        {
+            return true;
+        }
+
+        foreach (var constraintTypeFqn in constraintTypeFqns)
+        {
+            var constraintType = ResolveNamedType(compilation, constraintTypeFqn);
+            if (constraintType is null)
+            {
+                continue;
+            }
+
+            if (!TypeSatisfiesConstraint(commandType, constraintType))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Resolves a simple (non-generic) fully-qualified type name back to a symbol via <see cref="Compilation.GetTypeByMetadataName"/>.</summary>
+    private static INamedTypeSymbol? ResolveNamedType(Compilation compilation, string fullyQualifiedName)
+    {
+        var name = fullyQualifiedName;
+        if (name.StartsWith("global::", StringComparison.Ordinal))
+        {
+            name = name.Substring("global::".Length);
+        }
+
+        // Generic type names (e.g. "My.Marker<int>") aren't resolvable via GetTypeByMetadataName
+        // without converting to metadata arity syntax; not supported yet, so fail open.
+        return name.IndexOf('<') >= 0 ? null : compilation.GetTypeByMetadataName(name);
+    }
+
+    private static bool TypeSatisfiesConstraint(ITypeSymbol candidate, ITypeSymbol constraint)
+    {
+        if (SymbolEqualityComparer.Default.Equals(candidate, constraint))
+        {
+            return true;
+        }
+
+        if (constraint.TypeKind == TypeKind.Interface)
+        {
+            return candidate.AllInterfaces.Any(i => SymbolEqualityComparer.Default.Equals(i, constraint));
+        }
+
+        for (var baseType = candidate.BaseType; baseType is not null; baseType = baseType.BaseType)
+        {
+            if (SymbolEqualityComparer.Default.Equals(baseType, constraint))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static string GetDispatchMethodName(DispatchMethodInfo method) =>
         method.IsAsync ? "SendAsync" : "Send";
 
@@ -1870,7 +1980,8 @@ namespace AutoDispatch
                 Order = order,
                 SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
                 SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
-                Location = location
+                Location = location,
+                CommandConstraintTypeFqns = GetNamedConstraintTypeFqns(typeParameters[0])
             }
         };
     }
@@ -2003,7 +2114,8 @@ namespace AutoDispatch
                 Order = order,
                 SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
                 SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
-                Location = location
+                Location = location,
+                QueryConstraintTypeFqns = GetNamedConstraintTypeFqns(typeParameters[0])
             }
         };
     }
@@ -2393,7 +2505,8 @@ namespace AutoDispatch
                 Order = order,
                 SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
                 SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
-                Location = location
+                Location = location,
+                CommandConstraintTypeFqns = GetNamedConstraintTypeFqns(typeParameters[0])
             }
         };
     }
@@ -2507,7 +2620,8 @@ namespace AutoDispatch
                 Order = order,
                 SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
                 SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
-                Location = location
+                Location = location,
+                CommandConstraintTypeFqns = GetNamedConstraintTypeFqns(typeParameters[0])
             }
         };
     }
@@ -2595,6 +2709,14 @@ namespace AutoDispatch
         public int SortSpanStart { get; set; }
 
         public Location Location { get; set; } = Location.None;
+
+        /// <summary>
+        /// Fully-qualified names of any named-type (interface/base class) constraints declared on
+        /// the behavior's <c>TCommand</c> type parameter — e.g. <c>where TCommand : IAudited</c>.
+        /// When non-empty, this behavior is only applied to commands that satisfy every listed
+        /// constraint, instead of every command in the compilation.
+        /// </summary>
+        public ImmutableArray<string> CommandConstraintTypeFqns { get; set; } = ImmutableArray<string>.Empty;
     }
 
     private sealed class BehaviorCandidate
@@ -2615,6 +2737,9 @@ namespace AutoDispatch
         public int SortSpanStart { get; set; }
 
         public Location Location { get; set; } = Location.None;
+
+        /// <summary>Fully-qualified names of any named-type constraints on the behavior's <c>TQuery</c> type parameter.</summary>
+        public ImmutableArray<string> QueryConstraintTypeFqns { get; set; } = ImmutableArray<string>.Empty;
     }
 
     private sealed class StreamBehaviorCandidate
@@ -2685,6 +2810,9 @@ namespace AutoDispatch
         public int SortSpanStart { get; set; }
 
         public Location Location { get; set; } = Location.None;
+
+        /// <summary>Fully-qualified names of any named-type constraints on the processor's <c>TCommand</c> type parameter.</summary>
+        public ImmutableArray<string> CommandConstraintTypeFqns { get; set; } = ImmutableArray<string>.Empty;
     }
 
     private sealed class PreProcessorCandidate
@@ -2705,6 +2833,9 @@ namespace AutoDispatch
         public int SortSpanStart { get; set; }
 
         public Location Location { get; set; } = Location.None;
+
+        /// <summary>Fully-qualified names of any named-type constraints on the processor's <c>TCommand</c> type parameter.</summary>
+        public ImmutableArray<string> CommandConstraintTypeFqns { get; set; } = ImmutableArray<string>.Empty;
     }
 
     private sealed class PostProcessorCandidate

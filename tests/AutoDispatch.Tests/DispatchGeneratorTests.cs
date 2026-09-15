@@ -1058,6 +1058,119 @@ public sealed class CreateOrderHandler
     }
 
     [Fact]
+    public void OpenGenericBehavior_WithMarkerConstraint_OnlyAppliesToMatchingCommand()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public interface IAudited { }
+
+public sealed class AuditedCommand : IAudited { }
+public sealed class PlainCommand { }
+
+[Handler]
+public sealed class AuditedHandler
+{
+    public Task<int> HandleAsync(AuditedCommand cmd, CancellationToken ct = default) => Task.FromResult(1);
+}
+
+[Handler]
+public sealed class PlainHandler
+{
+    public Task<int> HandleAsync(PlainCommand cmd, CancellationToken ct = default) => Task.FromResult(2);
+}
+
+[Behavior(Order = 0)]
+public sealed class AuditBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+    where TCommand : IAudited
+{
+    public Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default) => next();
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var src = sources["AutoDispatch.Dispatcher.g.cs"];
+
+        // The constrained behavior must be woven into AuditedCommand's SendAsync ...
+        Assert.Contains("global::AuditBehavior<global::AuditedCommand", src);
+
+        // ... but PlainCommand doesn't satisfy `where TCommand : IAudited`, so it must fall back
+        // to the simple expression-bodied dispatch with no behavior wrapping at all.
+        Assert.DoesNotContain("global::AuditBehavior<global::PlainCommand", src);
+        Assert.Contains("=> this._sp.GetRequiredService<global::PlainHandler>().HandleAsync(command, ct);", src);
+    }
+
+    [Fact]
+    public async Task Behavior_Runtime_WithMarkerConstraint_OnlyRunsForMatchingCommand()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public interface IAudited { }
+
+public sealed class AuditedCommand : IAudited { }
+public sealed class PlainCommand { }
+
+[Handler]
+public sealed class AuditedHandler
+{
+    public Task<int> HandleAsync(AuditedCommand cmd, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""audited-handler"");
+        return Task.FromResult(1);
+    }
+}
+
+[Handler]
+public sealed class PlainHandler
+{
+    public Task<int> HandleAsync(PlainCommand cmd, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""plain-handler"");
+        return Task.FromResult(2);
+    }
+}
+
+[Behavior(Order = 0)]
+public sealed class AuditBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+    where TCommand : IAudited
+{
+    public Task<TResult> HandleAsync(TCommand command, System.Func<Task<TResult>> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""audit-behavior"");
+        return next();
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var dispatcherType = compiled.Assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var dispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+
+        var auditedCommandType = compiled.Assembly.GetType("AuditedCommand", throwOnError: true)!;
+        var auditedSendAsync = dispatcherType.GetMethod("SendAsync", new[] { auditedCommandType, typeof(CancellationToken) })!;
+        var auditedTask = (Task)auditedSendAsync.Invoke(dispatcher, new object[] { Activator.CreateInstance(auditedCommandType)!, CancellationToken.None })!;
+        await auditedTask;
+
+        var plainCommandType = compiled.Assembly.GetType("PlainCommand", throwOnError: true)!;
+        var plainSendAsync = dispatcherType.GetMethod("SendAsync", new[] { plainCommandType, typeof(CancellationToken) })!;
+        var plainTask = (Task)plainSendAsync.Invoke(dispatcher, new object[] { Activator.CreateInstance(plainCommandType)!, CancellationToken.None })!;
+        await plainTask;
+
+        // The behavior only runs ahead of the audited command's handler, never the plain one.
+        Assert.Equal(new[] { "audit-behavior", "audited-handler", "plain-handler" }, GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
     public void Diagnostic_AD004_BehaviorMustBeOpenGeneric()
     {
         RunGenerator(@"

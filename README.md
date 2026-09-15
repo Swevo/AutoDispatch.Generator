@@ -17,6 +17,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Exception handling middleware** — `[ExceptionHandler]` open generics intercept a typed exception thrown by a handler or pipeline behavior and can supply a fallback response, matching MediatR's `IRequestExceptionHandler<,,>`
 - **Exception actions** — `[ExceptionAction]` open generics always run as side-effect-only observers on a typed exception (logging, metrics, alerting) without suppressing it, matching MediatR's `IRequestExceptionAction<,>`
 - **Request pre/post-processors** — `[PreProcessor]`/`[PostProcessor]` open generics run unconditionally right before/after a handler executes, without writing a full `next()`-calling pipeline behavior, matching MediatR's `IRequestPreProcessor<>`/`IRequestPostProcessor<,>`
+- **Constrained (scoped) behaviors** — add a generic constraint (e.g. `where TCommand : IAudited`) to any `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]` to apply it only to matching commands, instead of every command in the compilation
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -288,6 +289,38 @@ Behaviors can also short-circuit by returning a result without calling `next()`.
 ### Behaviors only apply to async handlers
 
 Sync `T Send(...)` and `void Send(...)` methods are not wrapped. Add a pipeline when you migrate a sync handler to async, or keep it sync for zero overhead.
+
+### Constrained (scoped) behaviors
+
+By default a `[Behavior]` (and `[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]`) applies to
+**every** command in the compilation. Add a generic constraint to the `TCommand` type parameter
+to scope it to only the commands that satisfy it — matching how MediatR users constrain a
+registered `IPipelineBehavior<,>` to a subset of requests:
+
+```csharp
+public interface IAudited { }
+
+public sealed record CreateOrderCommand : IAudited { ... }   // audited
+public sealed record PingCommand { ... }                     // not audited
+
+[Behavior(Order = 0)]
+public sealed class AuditBehavior<TCommand, TResult> : IPipelineBehavior<TCommand, TResult>
+    where TCommand : IAudited
+{
+    public Task<TResult> HandleAsync(TCommand command, Func<Task<TResult>> next, CancellationToken ct = default)
+    {
+        // log an audit entry for `command` ...
+        return next();
+    }
+}
+```
+
+`AuditBehavior` is only woven into `CreateOrderCommand`'s generated `SendAsync` — `PingCommand`
+falls back to its normal dispatch (simple expression-bodied if no other pipeline steps apply)
+with no `AuditBehavior` reference at all, so it never pays for a pipeline it doesn't use.
+Constraint checking supports named interface/base-class constraints (the common case — marker
+interfaces like `IAudited`); a generic constraint type (e.g. `IMarker<T>`) isn't resolved yet and
+is treated as always-satisfied rather than silently dropping the behavior.
 
 ## Notifications (publish/subscribe)
 
