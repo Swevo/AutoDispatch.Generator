@@ -3158,5 +3158,291 @@ public sealed class CreateOrderHandler
         var activity = Assert.Single(activities);
         Assert.Equal(ActivityStatusCode.Error, activity.Status);
     }
+
+    // ---- Notification pipeline behaviors ([NotificationBehavior]) ----
+
+    [Fact]
+    public void Attributes_ContainsNotificationBehaviorAttributeAndInterface()
+    {
+        var sources = RunGenerator(string.Empty, out _);
+        var src = sources["AutoDispatch.Attributes.g.cs"];
+        Assert.Contains("NotificationBehaviorAttribute", src);
+        Assert.Contains("INotificationPipelineBehavior<TNotification>", src);
+    }
+
+    [Fact]
+    public void NotificationBehavior_WrapsPublishAsyncAndRegistersInDI()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class SendEmailOnOrderCreated
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+[NotificationBehavior(Order = 0)]
+public sealed class LoggingNotificationBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    public Task HandleAsync(TNotification notification, System.Func<Task> next, CancellationToken ct = default) => next();
+}", out var diagnostics);
+
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error);
+
+        var dispatcher = sources["AutoDispatch.Dispatcher.g.cs"];
+        Assert.Contains("LoggingNotificationBehavior<global::OrderCreated>", dispatcher);
+
+        var registration = sources["AutoDispatch.Registration.g.cs"];
+        Assert.Contains("services.AddScoped(typeof(global::LoggingNotificationBehavior<>));", registration);
+    }
+
+    [Fact]
+    public void NotificationBehavior_NotAGenericClass_ReportsAD028()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[NotificationBehavior]
+public sealed class BrokenNotificationBehavior : INotificationPipelineBehavior<object>
+{
+    public Task HandleAsync(object notification, System.Func<Task> next, CancellationToken ct = default) => next();
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD028" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void NotificationBehavior_DoesNotImplementInterface_ReportsAD029()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+[NotificationBehavior]
+public sealed class BrokenNotificationBehavior<TNotification>
+{
+    public Task HandleAsync(TNotification notification, System.Func<Task> next, CancellationToken ct = default) => next();
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD029" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public void NotificationBehavior_InvalidHandleAsyncSignature_ReportsAD030()
+    {
+        var sources = RunGenerator(@"
+using AutoDispatch;
+
+[NotificationBehavior]
+public sealed class BrokenNotificationBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    public void HandleAsync(TNotification notification) { }
+}", out var diagnostics);
+
+        Assert.Contains(diagnostics, d => d.Id == "AD030" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
+    public async Task NotificationBehavior_Runtime_WrapsSequentialFanOut()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class FirstHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""first"");
+        return Task.CompletedTask;
+    }
+}
+
+[NotificationHandler]
+public sealed class SecondHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""second"");
+        return Task.CompletedTask;
+    }
+}
+
+[NotificationBehavior(Order = 0)]
+public sealed class LoggingNotificationBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    public async Task HandleAsync(TNotification notification, System.Func<Task> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""before"");
+        await next();
+        Recorder.Entries.Add(""after"");
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+
+        Assert.Equal(new[] { "before", "first", "second", "after" }, GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public async Task NotificationBehavior_Runtime_MultipleBehaviorsFollowDeclarationOrder()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class OnlyHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handler"");
+        return Task.CompletedTask;
+    }
+}
+
+[NotificationBehavior]
+public sealed class FirstBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    public async Task HandleAsync(TNotification notification, System.Func<Task> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""first:before"");
+        await next();
+        Recorder.Entries.Add(""first:after"");
+    }
+}
+
+[NotificationBehavior]
+public sealed class SecondBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    public async Task HandleAsync(TNotification notification, System.Func<Task> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""second:before"");
+        await next();
+        Recorder.Entries.Add(""second:after"");
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+
+        Assert.Equal(
+            new[] { "first:before", "second:before", "handler", "second:after", "first:after" },
+            GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public async Task NotificationBehavior_Runtime_CanShortCircuitFanOut()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class OnlyHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""handler"");
+        return Task.CompletedTask;
+    }
+}
+
+[NotificationBehavior]
+public sealed class ShortCircuitBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    public Task HandleAsync(TNotification notification, System.Func<Task> next, CancellationToken ct = default)
+    {
+        Recorder.Entries.Add(""short-circuit"");
+        return Task.CompletedTask;
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+
+        Assert.Equal(new[] { "short-circuit" }, GetRecorderEntries(compiled.Assembly));
+    }
+
+    [Fact]
+    public async Task NotificationBehavior_Runtime_WrapsParallelPublishFanOut()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class Recorder
+{
+    public static List<string> Entries { get; } = new List<string>();
+}
+
+[ParallelPublish]
+public sealed class OrderCreated { }
+
+[NotificationHandler]
+public sealed class FirstHandler
+{
+    public Task HandleAsync(OrderCreated notification, CancellationToken ct = default)
+    {
+        lock (Recorder.Entries) { Recorder.Entries.Add(""handler""); }
+        return Task.CompletedTask;
+    }
+}
+
+[NotificationBehavior(Order = 0)]
+public sealed class LoggingNotificationBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    public async Task HandleAsync(TNotification notification, System.Func<Task> next, CancellationToken ct = default)
+    {
+        lock (Recorder.Entries) { Recorder.Entries.Add(""before""); }
+        await next();
+        lock (Recorder.Entries) { Recorder.Entries.Add(""after""); }
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        await InvokePublishAsync(compiled.Assembly, "OrderCreated");
+
+        Assert.Equal(new[] { "before", "handler", "after" }, GetRecorderEntries(compiled.Assembly));
+    }
 }
 

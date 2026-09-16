@@ -276,6 +276,30 @@ namespace AutoDispatch
             TResult response,
             System.Threading.CancellationToken ct = default);
     }
+
+    /// <summary>
+    /// Marks a class as a notification pipeline behavior — wraps an entire <c>PublishAsync</c>
+    /// call for a notification type (the whole fan-out to every registered handler, sequential or
+    /// <c>[ParallelPublish]</c>), not any single handler. Useful for logging, metrics, or
+    /// short-circuiting a publish before any handler runs. Declare a public, open generic class
+    /// with exactly one type parameter (<c>TNotification</c>) implementing
+    /// <see cref=""INotificationPipelineBehavior{TNotification}""/>. AutoDispatch has no MediatR
+    /// equivalent to model this after — MediatR does not support wrapping <c>Publish</c> with
+    /// pipeline behaviors.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    public sealed class NotificationBehaviorAttribute : Attribute
+    {
+        public int Order { get; set; } = 0;
+    }
+
+    public interface INotificationPipelineBehavior<TNotification>
+    {
+        System.Threading.Tasks.Task HandleAsync(
+            TNotification notification,
+            System.Func<System.Threading.Tasks.Task> next,
+            System.Threading.CancellationToken ct = default);
+    }
 }
 ";
 
@@ -495,6 +519,30 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD028 = new(
+        id: "AD028",
+        title: "Invalid notification behavior declaration",
+        messageFormat: "[NotificationBehavior] on '{0}' must be a public, non-abstract, open generic class with exactly one type parameter",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD029 = new(
+        id: "AD029",
+        title: "Notification behavior does not implement INotificationPipelineBehavior<TNotification>",
+        messageFormat: "[NotificationBehavior] on '{0}' must implement INotificationPipelineBehavior<TNotification> using its own type parameter",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD030 = new(
+        id: "AD030",
+        title: "Notification behavior has an invalid HandleAsync signature",
+        messageFormat: "[NotificationBehavior] on '{0}' must declare `public Task HandleAsync(TNotification notification, Func<Task> next, CancellationToken ct = default)`",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -535,6 +583,17 @@ namespace AutoDispatch
             .Where(static info => info is not null)
             .Select(static (info, _) => info!)
             .Collect();
+
+        var notificationBehaviors = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.NotificationBehaviorAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax,
+                transform: static (ctx, ct) => TransformNotificationBehavior(ctx, ct))
+            .Where(static b => b is not null)
+            .Select(static (b, _) => b!)
+            .Collect();
+
+        var notifications = notificationHandlers.Combine(notificationBehaviors);
 
         var streamHandlers = context.SyntaxProvider
             .ForAttributeWithMetadataName(
@@ -585,15 +644,16 @@ namespace AutoDispatch
 
         var processors = preProcessors.Combine(postProcessors);
 
-        var allInputs = handlers.Combine(behaviors).Combine(notificationHandlers).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors).Combine(context.CompilationProvider);
+        var allInputs = handlers.Combine(behaviors).Combine(notifications).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors).Combine(context.CompilationProvider);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var (((((((handlersTuple, behaviorList), notificationList), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple), compilation) = tuple;
+            var (((((((handlersTuple, behaviorList), notificationsTuple), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple), compilation) = tuple;
             var ((h1, h2), h3) = handlersTuple;
+            var (notificationList, notificationBehaviorList) = notificationsTuple;
             var (exceptionHandlerList, exceptionActionList) = exceptionMiddlewareTuple;
             var (preProcessorList, postProcessorList) = processorsTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList, compilation);
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, notificationBehaviorList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList, compilation);
         });
     }
 
@@ -908,6 +968,7 @@ namespace AutoDispatch
         ImmutableArray<HandlerInfo> handlers,
         ImmutableArray<BehaviorCandidate> behaviorCandidates,
         ImmutableArray<NotificationHandlerInfo> notificationHandlers,
+        ImmutableArray<NotificationBehaviorCandidate> notificationBehaviorCandidates,
         ImmutableArray<StreamHandlerInfo> streamHandlers,
         ImmutableArray<StreamBehaviorCandidate> streamBehaviorCandidates,
         ImmutableArray<ExceptionHandlerCandidate> exceptionHandlerCandidates,
@@ -931,6 +992,23 @@ namespace AutoDispatch
             }
 
             behaviors.Add(candidate.Behavior);
+        }
+
+        var notificationBehaviors = new List<NotificationBehaviorInfo>();
+        var seenNotificationBehaviorTypes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in notificationBehaviorCandidates)
+        {
+            foreach (var diagnostic in candidate.Diagnostics)
+            {
+                context.ReportDiagnostic(diagnostic);
+            }
+
+            if (candidate.NotificationBehavior is null || !seenNotificationBehaviorTypes.Add(candidate.NotificationBehavior.UnboundTypeFqn))
+            {
+                continue;
+            }
+
+            notificationBehaviors.Add(candidate.NotificationBehavior);
         }
 
         var exceptionHandlers = new List<ExceptionHandlerInfo>();
@@ -1208,13 +1286,20 @@ namespace AutoDispatch
             return;
         }
 
-        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors, compilation));
-        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors));
+        context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, notificationBehaviors, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors, compilation));
+        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, notificationBehaviors, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors));
     }
 
-    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors, Compilation compilation)
+    private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<NotificationBehaviorInfo> notificationBehaviors, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors, Compilation compilation)
     {
         var allBehaviors = behaviors
+            .OrderBy(static b => b.Order)
+            .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static b => b.SortSpanStart)
+            .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+
+        var allNotificationBehaviors = notificationBehaviors
             .OrderBy(static b => b.Order)
             .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
             .ThenBy(static b => b.SortSpanStart)
@@ -1566,60 +1651,132 @@ namespace AutoDispatch
         foreach (var group in notificationGroups)
         {
             var handlerNames = string.Join(", ", group.Methods.Select(static m => GetShortTypeName(m.HandlerTypeFqn)));
+            var hasNotificationBehaviors = allNotificationBehaviors.Length > 0;
 
-            if (!group.ParallelPublish)
+            if (!hasNotificationBehaviors)
             {
-                // Fan-out publish: every registered handler for this notification type runs in
-                // deterministic (handler-type-name) order. A handler throwing stops the remaining
-                // handlers from running, matching MediatR's default ForeachAwaitPublisher behavior.
-                sb.AppendLine($"        // Publish fan-out (sequential): {handlerNames}");
-                sb.AppendLine($"        public async global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
-                sb.AppendLine("        {");
-
-                foreach (var method in group.Methods)
+                if (!group.ParallelPublish)
                 {
-                    sb.Append("            await this._sp.GetRequiredService<");
-                    sb.Append(method.HandlerTypeFqn);
-                    sb.Append(">().HandleAsync(notification");
-                    if (method.HasCancellationTokenParameter)
+                    // Fan-out publish: every registered handler for this notification type runs in
+                    // deterministic (handler-type-name) order. A handler throwing stops the remaining
+                    // handlers from running, matching MediatR's default ForeachAwaitPublisher behavior.
+                    sb.AppendLine($"        // Publish fan-out (sequential): {handlerNames}");
+                    sb.AppendLine($"        public async global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
+                    sb.AppendLine("        {");
+
+                    foreach (var method in group.Methods)
                     {
-                        sb.Append(", ct");
+                        sb.Append("            await this._sp.GetRequiredService<");
+                        sb.Append(method.HandlerTypeFqn);
+                        sb.Append(">().HandleAsync(notification");
+                        if (method.HasCancellationTokenParameter)
+                        {
+                            sb.Append(", ct");
+                        }
+
+                        sb.AppendLine(").ConfigureAwait(false);");
                     }
 
-                    sb.AppendLine(").ConfigureAwait(false);");
+                    sb.AppendLine("        }");
+                    sb.AppendLine();
                 }
+                else
+                {
+                    // [ParallelPublish] fan-out: every registered handler for this notification type
+                    // is started immediately (via PublishTaskHelpers.SafeInvoke, which converts a
+                    // synchronous throw into a faulted task) and awaited together via Task.WhenAll,
+                    // matching MediatR's TaskWhenAllPublisher. All handlers run even if one throws;
+                    // failures surface as the first exception (or an AggregateException if more than
+                    // one handler faults and the caller inspects it directly).
+                    sb.AppendLine($"        // Publish fan-out (parallel via Task.WhenAll): {handlerNames}");
+                    sb.AppendLine($"        public global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
+                    sb.AppendLine("            => global::System.Threading.Tasks.Task.WhenAll(");
 
-                sb.AppendLine("        }");
-                sb.AppendLine();
+                    for (var i = 0; i < group.Methods.Count; i++)
+                    {
+                        var method = group.Methods[i];
+                        sb.Append("                global::AutoDispatch.PublishTaskHelpers.SafeInvoke(() => this._sp.GetRequiredService<");
+                        sb.Append(method.HandlerTypeFqn);
+                        sb.Append(">().HandleAsync(notification");
+                        if (method.HasCancellationTokenParameter)
+                        {
+                            sb.Append(", ct");
+                        }
+
+                        sb.Append(')');
+                        sb.Append(')');
+                        sb.AppendLine(i < group.Methods.Count - 1 ? "," : ");");
+                    }
+
+                    sb.AppendLine();
+                }
             }
             else
             {
-                // [ParallelPublish] fan-out: every registered handler for this notification type
-                // is started immediately (via PublishTaskHelpers.SafeInvoke, which converts a
-                // synchronous throw into a faulted task) and awaited together via Task.WhenAll,
-                // matching MediatR's TaskWhenAllPublisher. All handlers run even if one throws;
-                // failures surface as the first exception (or an AggregateException if more than
-                // one handler faults and the caller inspects it directly).
-                sb.AppendLine($"        // Publish fan-out (parallel via Task.WhenAll): {handlerNames}");
+                // One or more [NotificationBehavior] types are registered — the entire fan-out
+                // (sequential or parallel) is wrapped as the innermost step of a
+                // Func<Task>-based pipeline, exactly like command behaviors wrap a handler call.
+                // Unlike [Behavior], which only sees a single command, a notification behavior
+                // wraps every handler subscribed to this notification type at once (there is no
+                // MediatR equivalent for this).
+                var behaviorNames = string.Join(", ", allNotificationBehaviors.Select(static b => GetShortTypeName(b.UnboundTypeFqn)));
+                sb.AppendLine($"        // Publish fan-out ({(group.ParallelPublish ? "parallel via Task.WhenAll" : "sequential")}), wrapped by notification behaviors: {behaviorNames}");
                 sb.AppendLine($"        public global::System.Threading.Tasks.Task PublishAsync({group.NotificationTypeFqn} notification, global::System.Threading.CancellationToken ct = default)");
-                sb.AppendLine("            => global::System.Threading.Tasks.Task.WhenAll(");
+                sb.AppendLine("        {");
+                sb.AppendLine("            global::System.Func<global::System.Threading.Tasks.Task> pipeline = async () =>");
+                sb.AppendLine("            {");
 
-                for (var i = 0; i < group.Methods.Count; i++)
+                if (!group.ParallelPublish)
                 {
-                    var method = group.Methods[i];
-                    sb.Append("                global::AutoDispatch.PublishTaskHelpers.SafeInvoke(() => this._sp.GetRequiredService<");
-                    sb.Append(method.HandlerTypeFqn);
-                    sb.Append(">().HandleAsync(notification");
-                    if (method.HasCancellationTokenParameter)
+                    foreach (var method in group.Methods)
                     {
-                        sb.Append(", ct");
-                    }
+                        sb.Append("                await this._sp.GetRequiredService<");
+                        sb.Append(method.HandlerTypeFqn);
+                        sb.Append(">().HandleAsync(notification");
+                        if (method.HasCancellationTokenParameter)
+                        {
+                            sb.Append(", ct");
+                        }
 
-                    sb.Append(')');
-                    sb.Append(')');
-                    sb.AppendLine(i < group.Methods.Count - 1 ? "," : ");");
+                        sb.AppendLine(").ConfigureAwait(false);");
+                    }
+                }
+                else
+                {
+                    sb.AppendLine("                await global::System.Threading.Tasks.Task.WhenAll(");
+
+                    for (var i = 0; i < group.Methods.Count; i++)
+                    {
+                        var method = group.Methods[i];
+                        sb.Append("                    global::AutoDispatch.PublishTaskHelpers.SafeInvoke(() => this._sp.GetRequiredService<");
+                        sb.Append(method.HandlerTypeFqn);
+                        sb.Append(">().HandleAsync(notification");
+                        if (method.HasCancellationTokenParameter)
+                        {
+                            sb.Append(", ct");
+                        }
+
+                        sb.Append(')');
+                        sb.Append(')');
+                        sb.AppendLine(i < group.Methods.Count - 1 ? "," : ").ConfigureAwait(false);");
+                    }
                 }
 
+                sb.AppendLine("            };");
+                sb.AppendLine();
+
+                for (var i = allNotificationBehaviors.Length - 1; i >= 0; i--)
+                {
+                    var behavior = allNotificationBehaviors[i];
+                    var behaviorTypeFqn = behavior.UnboundTypeFqn.Replace("<>", $"<{group.NotificationTypeFqn}>");
+                    sb.AppendLine($"            var _nb{i} = this._sp.GetRequiredService<{behaviorTypeFqn}>();");
+                    sb.AppendLine($"            var _np{i} = pipeline;");
+                    sb.AppendLine($"            pipeline = () => _nb{i}.HandleAsync(notification, _np{i}, ct);");
+                }
+
+                sb.AppendLine();
+                sb.AppendLine("            return pipeline();");
+                sb.AppendLine("        }");
                 sb.AppendLine();
             }
         }
@@ -1847,7 +2004,7 @@ namespace AutoDispatch
         sb.AppendLine("    }");
     }
 
-    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors)
+    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationBehaviorInfo> notificationBehaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors)
     {
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -1888,6 +2045,11 @@ namespace AutoDispatch
         }
 
         foreach (var behavior in behaviors.OrderBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal))
+        {
+            sb.AppendLine($"            services.AddScoped(typeof({behavior.UnboundTypeFqn}));");
+        }
+
+        foreach (var behavior in notificationBehaviors.OrderBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal))
         {
             sb.AppendLine($"            services.AddScoped(typeof({behavior.UnboundTypeFqn}));");
         }
@@ -2309,6 +2471,136 @@ namespace AutoDispatch
                 !SymbolEqualityComparer.Default.Equals(nextResultType.OriginalDefinition, taskType) ||
                 nextResultType.TypeArguments.Length != 1 ||
                 !SymbolEqualityComparer.Default.Equals(nextResultType.TypeArguments[0], typeSymbol.TypeParameters[1]))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static NotificationBehaviorCandidate? TransformNotificationBehavior(GeneratorAttributeSyntaxContext context, CancellationToken ct)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return null;
+        }
+
+        var behaviorDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var location = typeSymbol.Locations.FirstOrDefault() ?? Location.None;
+
+        if (typeSymbol.TypeKind != TypeKind.Class ||
+            typeSymbol.DeclaredAccessibility != Accessibility.Public ||
+            typeSymbol.IsAbstract ||
+            typeSymbol.TypeParameters.Length != 1)
+        {
+            return new NotificationBehaviorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD028,
+                    location,
+                    behaviorDisplayName))
+            };
+        }
+
+        var notificationBehaviorType = context.SemanticModel.Compilation.GetTypeByMetadataName("AutoDispatch.INotificationPipelineBehavior`1");
+        var typeParameter = typeSymbol.TypeParameters[0];
+        var implementsNotificationBehavior =
+            notificationBehaviorType is not null &&
+            typeSymbol.AllInterfaces.Any(interfaceSymbol =>
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.OriginalDefinition, notificationBehaviorType) &&
+                interfaceSymbol.TypeArguments.Length == 1 &&
+                SymbolEqualityComparer.Default.Equals(interfaceSymbol.TypeArguments[0], typeParameter));
+
+        if (!implementsNotificationBehavior)
+        {
+            return new NotificationBehaviorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD029,
+                    location,
+                    behaviorDisplayName))
+            };
+        }
+
+        if (!HasValidNotificationBehaviorHandleAsync(typeSymbol, context.SemanticModel.Compilation))
+        {
+            return new NotificationBehaviorCandidate
+            {
+                Diagnostics = ImmutableArray.Create(Diagnostic.Create(
+                    AD030,
+                    location,
+                    behaviorDisplayName))
+            };
+        }
+
+        var order = 0;
+        foreach (var attr in context.Attributes)
+        {
+            foreach (var arg in attr.NamedArguments)
+            {
+                if (arg.Key == "Order" && arg.Value.Value is int v)
+                {
+                    order = v;
+                }
+            }
+        }
+
+        return new NotificationBehaviorCandidate
+        {
+            NotificationBehavior = new NotificationBehaviorInfo
+            {
+                UnboundTypeFqn = ToFullyQualified(typeSymbol.ConstructUnboundGenericType()),
+                Order = order,
+                SortFilePath = typeSymbol.Locations.FirstOrDefault()?.SourceTree?.FilePath ?? string.Empty,
+                SortSpanStart = typeSymbol.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0,
+                Location = location
+            }
+        };
+    }
+
+    private static bool HasValidNotificationBehaviorHandleAsync(INamedTypeSymbol typeSymbol, Compilation compilation)
+    {
+        var cancellationTokenType = compilation.GetTypeByMetadataName("System.Threading.CancellationToken");
+        var taskType = compilation.GetTypeByMetadataName("System.Threading.Tasks.Task");
+        var funcType = compilation.GetTypeByMetadataName("System.Func`1");
+
+        if (cancellationTokenType is null || taskType is null || funcType is null)
+        {
+            return false;
+        }
+
+        foreach (var method in typeSymbol.GetMembers("HandleAsync").OfType<IMethodSymbol>())
+        {
+            if (method.MethodKind != MethodKind.Ordinary ||
+                method.IsStatic ||
+                method.DeclaredAccessibility != Accessibility.Public ||
+                method.Parameters.Length != 3 ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, typeSymbol.TypeParameters[0]) ||
+                !SymbolEqualityComparer.Default.Equals(method.Parameters[2].Type, cancellationTokenType))
+            {
+                continue;
+            }
+
+            if (method.ReturnType is not INamedTypeSymbol returnType ||
+                !SymbolEqualityComparer.Default.Equals(returnType.OriginalDefinition, taskType) ||
+                returnType.TypeArguments.Length != 0)
+            {
+                continue;
+            }
+
+            if (method.Parameters[1].Type is not INamedTypeSymbol nextType ||
+                !SymbolEqualityComparer.Default.Equals(nextType.OriginalDefinition, funcType) ||
+                nextType.TypeArguments.Length != 1)
+            {
+                continue;
+            }
+
+            if (nextType.TypeArguments[0] is not INamedTypeSymbol nextResultType ||
+                !SymbolEqualityComparer.Default.Equals(nextResultType.OriginalDefinition, taskType) ||
+                nextResultType.TypeArguments.Length != 0)
             {
                 continue;
             }
@@ -3003,6 +3295,31 @@ namespace AutoDispatch
     private sealed class BehaviorCandidate
     {
         public BehaviorInfo? Behavior { get; set; }
+
+        public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
+    }
+
+    /// <summary>
+    /// A registered <c>[NotificationBehavior]</c> — unlike <see cref="BehaviorInfo"/>, this wraps
+    /// the *entire* <c>PublishAsync</c> fan-out for a notification type (every subscribed
+    /// handler), not a single command's handler call.
+    /// </summary>
+    private sealed class NotificationBehaviorInfo
+    {
+        public string UnboundTypeFqn { get; set; } = string.Empty;
+
+        public int Order { get; set; }
+
+        public string SortFilePath { get; set; } = string.Empty;
+
+        public int SortSpanStart { get; set; }
+
+        public Location Location { get; set; } = Location.None;
+    }
+
+    private sealed class NotificationBehaviorCandidate
+    {
+        public NotificationBehaviorInfo? NotificationBehavior { get; set; }
 
         public ImmutableArray<Diagnostic> Diagnostics { get; set; } = ImmutableArray<Diagnostic>.Empty;
     }

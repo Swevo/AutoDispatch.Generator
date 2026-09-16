@@ -392,7 +392,7 @@ await dispatcher.PublishAsync(new OrderCreated(orderId), ct);
 - By default, handlers run **sequentially**, in deterministic order (by handler type name), awaiting each one before starting the next — matching MediatR's default `ForeachAwaitPublisher` behavior. If a handler throws, remaining handlers for that publish call do not run
 - Mark the **notification type itself** `[ParallelPublish]` to switch that notification to **concurrent** fan-out via `Task.WhenAll` instead — matching MediatR's opt-in `TaskWhenAllPublisher`. All handlers start immediately and are awaited together; every handler runs even if another one throws (a synchronous throw is safely converted to a faulted task so it doesn't skip the rest), and failures surface once every handler has finished
 - `[NotificationHandler(Lifetime = HandlerLifetime.Singleton)]` (or `Transient`) works the same way as it does on `[Handler]`
-- Pipeline `[Behavior]`s currently apply only to command/query dispatch (`Send`/`SendAsync`), not to `PublishAsync` — this may be added in a future release
+- Pipeline `[Behavior]`s apply only to command/query dispatch (`Send`/`SendAsync`). To wrap `PublishAsync` itself, use [notification pipeline behaviors](#notification-pipeline-behaviors) instead
 
 ### Parallel publish
 
@@ -422,6 +422,48 @@ public sealed class UpdateAnalytics
 // SendConfirmationEmail and UpdateAnalytics now both start immediately and run concurrently
 await dispatcher.PublishAsync(new OrderCreated(orderId), ct);
 ```
+
+## Notification pipeline behaviors
+
+`[Behavior]` wraps a single command's handler call. `[NotificationBehavior]` is its `Publish`-side
+counterpart — it wraps the **entire fan-out** for a notification type (every subscribed handler,
+whether sequential or `[ParallelPublish]`) in one `Func<Task>`-based pipeline. There is no MediatR
+equivalent for this: MediatR's `IPipelineBehavior<,>` only wraps `Send`, never `Publish`.
+
+```csharp
+using AutoDispatch;
+
+public sealed record OrderCreated(Guid OrderId);
+
+[NotificationBehavior(Order = 0)]
+public sealed class LoggingNotificationBehavior<TNotification> : INotificationPipelineBehavior<TNotification>
+{
+    private readonly ILogger<LoggingNotificationBehavior<TNotification>> _logger;
+
+    public LoggingNotificationBehavior(ILogger<LoggingNotificationBehavior<TNotification>> logger) => _logger = logger;
+
+    public async Task HandleAsync(TNotification notification, Func<Task> next, CancellationToken ct = default)
+    {
+        _logger.LogInformation("Publishing {Notification}", typeof(TNotification).Name);
+        await next();
+        _logger.LogInformation("Published {Notification}", typeof(TNotification).Name);
+    }
+}
+```
+
+Every `PublishAsync(OrderCreated, ...)` call — sequential or `[ParallelPublish]` — now runs inside
+this behavior. Register any number of them; like `[Behavior]`, they compose by `Order` (ties broken
+by declaration order), and a behavior can call `next()` zero, one, or multiple times, or not at all
+to short-circuit the entire publish.
+
+### Conventions
+
+- Must be a `public`, non-`abstract` open generic class with exactly **one** type parameter (`TNotification`)
+- Must implement `INotificationPipelineBehavior<TNotification>` using its own type parameter (`AD029` otherwise)
+- Must declare `public Task HandleAsync(TNotification notification, Func<Task> next, CancellationToken ct = default)` (`AD030` otherwise)
+- Applies to **every** notification type in the compilation — there is currently no constrained/scoped variant (unlike `[Behavior]`); this may be added in a future release
+- `AddAutoDispatch()` registers each `[NotificationBehavior]` type as an open generic, the same way `[Behavior]` is registered
+- No codegen change to `PublishAsync` at all when no `[NotificationBehavior]` is registered
 
 ## Streaming queries
 
@@ -655,6 +697,9 @@ Conventions:
 | AD025 | Error | `[PostProcessor]` type does not implement `IPostProcessor<TCommand, TResult>` |
 | AD026 | Error | `[PostProcessor]` type does not expose a valid public `ProcessAsync` method |
 | AD027 | Warning | A constrained `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]`'s constraint doesn't match any registered command/query — it will never run |
+| AD028 | Error | `[NotificationBehavior]` type is not a public, non-abstract open generic class with exactly one type parameter |
+| AD029 | Error | `[NotificationBehavior]` type does not implement `INotificationPipelineBehavior<TNotification>` |
+| AD030 | Error | `[NotificationBehavior]` type does not expose a valid public `HandleAsync` method |
 
 ### AD001
 

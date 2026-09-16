@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.15.0] - 2026-09-17
+
+### Added
+- **Notification pipeline behaviors** — mark a public, open generic class with one type parameter (`TNotification`) implementing `INotificationPipelineBehavior<TNotification>` as `[NotificationBehavior(Order=N)]` to wrap the *entire* `PublishAsync` fan-out for every notification type (all subscribed handlers, whether sequential or `[ParallelPublish]`) in a `Func<Task>`-based pipeline
+- Unlike `[Behavior]`, which wraps a single command's handler call, a notification behavior wraps every handler subscribed to a notification type at once — there is no MediatR equivalent for this (MediatR's `IPipelineBehavior<,>` only wraps `Send`, not `Publish`)
+- Useful for logging/metrics around a whole publish, retry-the-entire-fan-out logic, or short-circuiting a publish entirely
+- Multiple notification behaviors compose in `Order` (ties broken by declaration order), matching `[Behavior]`'s ordering rules; a behavior can call `next()` zero, one, or multiple times, or not at all (short-circuit)
+- New diagnostics: **AD028** (must be a public, non-abstract, open generic class with exactly one type parameter), **AD029** (must implement `INotificationPipelineBehavior<TNotification>`), **AD030** (must declare a valid `HandleAsync(TNotification, Func<Task>, CancellationToken)`)
+- Zero codegen change to `PublishAsync` when no `[NotificationBehavior]` is registered
+- README: new "Notification pipeline behaviors" section, feature bullet, and AD028-AD030 diagnostics table rows
+- 9 new tests (attribute/interface source generation; wraps-and-registers; AD028/AD029/AD030 structural diagnostics; runtime tests for sequential wrapping, declaration-order composition, short-circuiting, and wrapping `[ParallelPublish]` fan-out); 132/132 passing solution-wide
+
 ## [1.14.1] - 2026-09-16
 
 ### Fixed
