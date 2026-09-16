@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.14.1] - 2026-09-16
+
+### Fixed
+- **NuGet package documentation** — `PackageReleaseNotes` (shown on the NuGet.org package page) had gone stale after the 1.13.0/1.13.1/1.14.0 releases; it still stopped at 1.12.0. Added the missing 1.13.0 (constrained behaviors), 1.13.1 (AD027 diagnostic), and 1.14.0 (OpenTelemetry tracing) entries so the published package listing matches the README/CHANGELOG history.
+- No code changes; version bump only to allow republishing corrected package metadata (NuGet package versions are immutable once published).
+
 ## [1.14.0] - 2026-09-15
 
 ### Added
