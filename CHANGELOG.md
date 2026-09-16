@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.16.0] - 2026-09-16
+
+### Added
+- **Automatic MediatR migration hints (AD100/AD101)** — a new analyzer, shipped alongside the existing generator diagnostics, detects classes still implementing MediatR's `IRequestHandler<,>`, `IRequestHandler<>`, or `INotificationHandler<>` and reports an `Info`-severity suggestion with a one-click **"Convert to AutoDispatch [Handler]"** / **"Convert to AutoDispatch [NotificationHandler]"** code fix
+- The fix adds the `[Handler]`/`[NotificationHandler]` attribute, removes the MediatR interface from the class's base list, and renames MediatR's `Handle` method to AutoDispatch's `HandleAsync` convention — combined with "Fix all occurrences in Solution", an entire MediatR codebase's handlers can be converted in a couple of clicks
+- The analyzer looks up MediatR's interfaces by fully-qualified metadata name and does zero additional per-symbol work in any compilation that doesn't reference MediatR at all, so it costs nothing for projects that have already migrated (or never used MediatR)
+- README: new "Automatic MediatR migration hints" section, AD100/AD101 diagnostics table rows, feature bullet, and a cross-reference from "Migrating from MediatR"
+- 6 new tests (AD100/AD101 fire on MediatR-style request/notification handlers; no diagnostic when already migrated or when MediatR isn't referenced; both code fixes verified end-to-end); 138/138 passing solution-wide
+
 ## [1.15.0] - 2026-09-17
 
 ### Added

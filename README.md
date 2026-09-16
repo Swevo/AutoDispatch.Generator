@@ -19,6 +19,8 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Request pre/post-processors** — `[PreProcessor]`/`[PostProcessor]` open generics run unconditionally right before/after a handler executes, without writing a full `next()`-calling pipeline behavior, matching MediatR's `IRequestPreProcessor<>`/`IRequestPostProcessor<,>`
 - **Constrained (scoped) behaviors** — add a generic constraint (e.g. `where TCommand : IAudited`) to any `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/`[StreamBehavior]` to apply it only to matching commands, instead of every command in the compilation
 - **Built-in OpenTelemetry-compatible tracing** — opt in with `AddAutoDispatch(o => o.EnableTracing = true)` to wrap every `SendAsync`/`PublishAsync`/`StreamAsync` call in an `Activity`, with zero overhead when no listener is subscribed
+- **Notification pipeline behaviors** — `[NotificationBehavior(Order = N)]` wraps the entire `PublishAsync` fan-out for a notification type, something MediatR has no equivalent for
+- **Automatic MediatR migration hints** — if MediatR is still referenced, AutoDispatch reports an `AD100`/`AD101` suggestion with a one-click fix that converts a handler to `[Handler]`/`[NotificationHandler]` for you
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -832,6 +834,29 @@ public Task<OrderId> SendAsync(CreateOrderCommand command, CancellationToken ct 
 | AD008 | Adds the missing `CancellationToken ct = default` parameter to a notification `HandleAsync` |
 | AD009 | Adds a `HandleAsync` stub method to a `[StreamHandler]` class with none |
 | AD011 | Adds the missing `CancellationToken ct = default` parameter to a stream `HandleAsync` |
+| AD100 | Converts a MediatR `IRequestHandler<,>`/`IRequestHandler<>` class to `[Handler]` — see [Migrating from MediatR](#migrating-from-mediatr) |
+| AD101 | Converts a MediatR `INotificationHandler<>` class to `[NotificationHandler]` — see [Migrating from MediatR](#migrating-from-mediatr) |
+
+### Automatic MediatR migration hints (AD100/AD101)
+
+You don't have to convert an existing MediatR codebase by hand. As soon as `AutoDispatch.Generator`
+is installed alongside MediatR, it detects any class still implementing MediatR's
+`IRequestHandler<,>`, `IRequestHandler<>`, or `INotificationHandler<>` and reports an IDE suggestion
+(`AD100`/`AD101`, `Info` severity — never breaks your build) with a one-click **"Convert to
+AutoDispatch [Handler]"** / **"Convert to AutoDispatch [NotificationHandler]"** fix that:
+
+- Adds the `[Handler]`/`[NotificationHandler]` attribute
+- Removes the MediatR interface from the class's base list
+- Renames MediatR's `Handle` method to AutoDispatch's `HandleAsync` convention (parameters,
+  including the existing `CancellationToken`, are left untouched)
+
+This costs nothing in projects that don't reference MediatR at all — the analyzer looks up
+MediatR's interfaces by fully-qualified name and skips all further work for the whole compilation
+if they aren't found. Combined with `Ctrl+.` → **Fix all occurrences in Solution**, an entire
+MediatR-based codebase's handlers can be converted in a couple of clicks; see
+[Migrating from MediatR](#migrating-from-mediatr) for the remaining manual steps (pipeline
+behaviors, DI registration, and call sites).
+
 
 ## Testing handlers and behaviors
 
@@ -913,7 +938,15 @@ still ~1.8x faster and allocates ~3x less than MediatR's equivalent runtime pipe
 
 ## Migrating from MediatR
 
-AutoDispatch follows the same CQRS mental model as MediatR, so migration is mechanical:
+AutoDispatch follows the same CQRS mental model as MediatR, so migration is mechanical.
+
+> **Tip:** Steps 2 and 3 below (removing marker interfaces, renaming `Handle` to `HandleAsync`,
+> swapping in `[Handler]`/`[NotificationHandler]`) can be done automatically. Add
+> `AutoDispatch.Generator` to a project that still references MediatR and it will surface an
+> `AD100`/`AD101` suggestion with a one-click fix on every handler — see
+> [Automatic MediatR migration hints](#automatic-mediatr-migration-hints-ad100ad101). Steps 1, 4,
+> 5, and 6 (removing the MediatR package, converting pipeline behaviors, DI registration, and call
+> sites) are still manual.
 
 ### 1. Install AutoDispatch and remove MediatR
 

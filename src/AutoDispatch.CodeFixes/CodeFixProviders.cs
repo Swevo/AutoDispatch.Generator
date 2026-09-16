@@ -174,3 +174,112 @@ public sealed class AddStreamHandleAsyncStubCodeFixProvider : CodeFixProvider
         return editor.GetChangedDocument();
     }
 }
+
+/// <summary>
+/// Quick fix for AD100 and AD101 (see <see cref="MediatRMigrationAnalyzer"/>): converts a MediatR
+/// <c>IRequestHandler&lt;,&gt;</c>/<c>IRequestHandler&lt;&gt;</c>/<c>INotificationHandler&lt;&gt;</c>
+/// class into its AutoDispatch equivalent by adding <c>[Handler]</c>/<c>[NotificationHandler]</c>,
+/// removing the MediatR interface from the base list, and renaming MediatR's <c>Handle</c> method
+/// to AutoDispatch's <c>HandleAsync</c> convention (parameters — including the existing
+/// <c>CancellationToken</c> — are left untouched, since both frameworks pass them the same way).
+/// </summary>
+[ExportCodeFixProvider(LanguageNames.CSharp, Name = nameof(MediatRMigrationCodeFixProvider))]
+[Shared]
+public sealed class MediatRMigrationCodeFixProvider : CodeFixProvider
+{
+    public override ImmutableArray<string> FixableDiagnosticIds { get; } = ImmutableArray.Create(
+        MediatRMigrationAnalyzer.RequestHandlerDiagnosticId,
+        MediatRMigrationAnalyzer.NotificationHandlerDiagnosticId);
+
+    public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;
+
+    public override async Task RegisterCodeFixesAsync(CodeFixContext context)
+    {
+        var root = await context.Document.GetSyntaxRootAsync(context.CancellationToken).ConfigureAwait(false);
+        if (root is null)
+        {
+            return;
+        }
+
+        var diagnostic = context.Diagnostics.First();
+        var node = root.FindNode(diagnostic.Location.SourceSpan);
+        var classDeclaration = node.FirstAncestorOrSelf<ClassDeclarationSyntax>();
+        if (classDeclaration is null)
+        {
+            return;
+        }
+
+        var isNotification = diagnostic.Id == MediatRMigrationAnalyzer.NotificationHandlerDiagnosticId;
+        var title = isNotification ? "Convert to AutoDispatch [NotificationHandler]" : "Convert to AutoDispatch [Handler]";
+
+        context.RegisterCodeFix(
+            CodeAction.Create(
+                title: title,
+                createChangedDocument: ct => ConvertAsync(context.Document, classDeclaration, isNotification, ct),
+                equivalenceKey: title),
+            diagnostic);
+    }
+
+    private static async Task<Document> ConvertAsync(
+        Document document,
+        ClassDeclarationSyntax classDeclaration,
+        bool isNotification,
+        CancellationToken cancellationToken)
+    {
+        var semanticModel = await document.GetSemanticModelAsync(cancellationToken).ConfigureAwait(false);
+        if (semanticModel is null)
+        {
+            return document;
+        }
+
+        var compilation = semanticModel.Compilation;
+        var requestHandler2 = compilation.GetTypeByMetadataName("MediatR.IRequestHandler`2");
+        var requestHandler1 = compilation.GetTypeByMetadataName("MediatR.IRequestHandler`1");
+        var notificationHandler1 = compilation.GetTypeByMetadataName("MediatR.INotificationHandler`1");
+
+        // Find the base-list entry whose resolved symbol matches one of the known MediatR
+        // interfaces, so it can be removed regardless of how many other interfaces/base classes
+        // the handler also declares.
+        BaseTypeSyntax? mediatRBaseType = null;
+        if (classDeclaration.BaseList is not null)
+        {
+            foreach (var baseType in classDeclaration.BaseList.Types)
+            {
+                var original = (semanticModel.GetTypeInfo(baseType.Type, cancellationToken).Type as INamedTypeSymbol)?.OriginalDefinition;
+                if (original is null)
+                {
+                    continue;
+                }
+
+                if (SymbolEqualityComparer.Default.Equals(original, requestHandler2) ||
+                    SymbolEqualityComparer.Default.Equals(original, requestHandler1) ||
+                    SymbolEqualityComparer.Default.Equals(original, notificationHandler1))
+                {
+                    mediatRBaseType = baseType;
+                    break;
+                }
+            }
+        }
+
+        var editor = await DocumentEditor.CreateAsync(document, cancellationToken).ConfigureAwait(false);
+        var generator = editor.Generator;
+
+        var attributeTypeName = isNotification ? "global::AutoDispatch.NotificationHandlerAttribute" : "global::AutoDispatch.HandlerAttribute";
+        editor.AddAttribute(classDeclaration, generator.Attribute(attributeTypeName));
+
+        if (mediatRBaseType is not null)
+        {
+            editor.RemoveNode(mediatRBaseType);
+        }
+
+        foreach (var member in classDeclaration.Members.OfType<MethodDeclarationSyntax>())
+        {
+            if (member.Identifier.Text == "Handle")
+            {
+                editor.ReplaceNode(member, member.WithIdentifier(SyntaxFactory.Identifier("HandleAsync")));
+            }
+        }
+
+        return editor.GetChangedDocument();
+    }
+}
