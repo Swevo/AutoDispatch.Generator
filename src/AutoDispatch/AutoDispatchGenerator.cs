@@ -300,6 +300,32 @@ namespace AutoDispatch
             System.Func<System.Threading.Tasks.Task> next,
             System.Threading.CancellationToken ct = default);
     }
+
+    /// <summary>
+    /// Maps a command or query type directly to an ASP.NET Core minimal API route. When at least
+    /// one class/record carries this attribute and the compilation references
+    /// <c>Microsoft.AspNetCore.Routing</c>, AutoDispatch generates a
+    /// <c>MapAutoDispatchEndpoints(this IEndpointRouteBuilder app)</c> extension method that wires
+    /// every attributed request straight to the generated <c>IDispatcher</c> — no hand-written
+    /// minimal API lambda required. GET/HEAD/DELETE requests bind the request type via
+    /// <c>[AsParameters]</c> (route/query values, no body expected); POST/PUT/PATCH bind it from
+    /// the request body (<c>[FromBody]</c>), matching ASP.NET Core minimal API conventions.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct, AllowMultiple = true, Inherited = false)]
+    public sealed class EndpointAttribute : Attribute
+    {
+        public EndpointAttribute(string method, string route)
+        {
+            Method = method;
+            Route = route;
+        }
+
+        /// <summary>The HTTP method, e.g. <c>""GET""</c>, <c>""POST""</c>, <c>""PUT""</c>, <c>""PATCH""</c>, <c>""DELETE""</c>.</summary>
+        public string Method { get; }
+
+        /// <summary>The route pattern, e.g. <c>""/orders/{id}""</c>.</summary>
+        public string Route { get; }
+    }
 }
 ";
 
@@ -543,6 +569,22 @@ namespace AutoDispatch
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    private static readonly DiagnosticDescriptor AD031 = new(
+        id: "AD031",
+        title: "Duplicate minimal API endpoint route",
+        messageFormat: "'{0} {1}' is mapped by more than one [Endpoint] declaration; each HTTP method + route combination must be unique",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    private static readonly DiagnosticDescriptor AD032 = new(
+        id: "AD032",
+        title: "[Endpoint] on a type with no matching command/query dispatch method",
+        messageFormat: "'{0}' is decorated with [Endpoint], but no [Handler]/[CommandHandler]/[QueryHandler] method dispatches it — the endpoint will not be generated",
+        category: "AutoDispatch",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     private static readonly SymbolDisplayFormat FullyQualifiedFormat =
         SymbolDisplayFormat.FullyQualifiedFormat
             .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
@@ -664,16 +706,28 @@ namespace AutoDispatch
             .Select(static (v, _) => v!)
             .Collect();
 
-        var allInputs = handlers.Combine(behaviors).Combine(notifications).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors).Combine(validators).Combine(context.CompilationProvider);
+        // Minimal API endpoint generation: [Endpoint] is applied directly to a command/query
+        // type (not a handler), so this uses ForAttributeWithMetadataName like every other
+        // AutoDispatch-attribute-gated provider — cheap and a total no-op when [Endpoint] is
+        // never used anywhere in the compilation.
+        var endpoints = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "AutoDispatch.EndpointAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax or RecordDeclarationSyntax or StructDeclarationSyntax,
+                transform: static (ctx, ct) => TransformEndpoint(ctx, ct))
+            .SelectMany(static (arr, _) => arr)
+            .Collect();
+
+        var allInputs = handlers.Combine(behaviors).Combine(notifications).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors).Combine(validators).Combine(endpoints).Combine(context.CompilationProvider);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var ((((((((handlersTuple, behaviorList), notificationsTuple), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple), validatorList), compilation) = tuple;
+            var (((((((((handlersTuple, behaviorList), notificationsTuple), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple), validatorList), endpointList), compilation) = tuple;
             var ((h1, h2), h3) = handlersTuple;
             var (notificationList, notificationBehaviorList) = notificationsTuple;
             var (exceptionHandlerList, exceptionActionList) = exceptionMiddlewareTuple;
             var (preProcessorList, postProcessorList) = processorsTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, notificationBehaviorList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList, validatorList, compilation);
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, notificationBehaviorList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList, validatorList, endpointList, compilation);
         });
     }
 
@@ -715,6 +769,48 @@ namespace AutoDispatch
         }
 
         return null;
+    }
+
+    private static ImmutableArray<EndpointInfo> TransformEndpoint(GeneratorAttributeSyntaxContext context, CancellationToken cancellationToken)
+    {
+        if (context.TargetSymbol is not INamedTypeSymbol typeSymbol)
+        {
+            return ImmutableArray<EndpointInfo>.Empty;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var requestTypeFqn = ToFullyQualified(typeSymbol);
+        var requestDisplayName = typeSymbol.ToDisplayString(SymbolDisplayFormat.CSharpErrorMessageFormat);
+        var location = typeSymbol.Locations.FirstOrDefault() ?? Location.None;
+
+        var builder = ImmutableArray.CreateBuilder<EndpointInfo>();
+        foreach (var attribute in context.Attributes)
+        {
+            if (attribute.AttributeClass?.ToDisplayString() != "AutoDispatch.EndpointAttribute" ||
+                attribute.ConstructorArguments.Length != 2)
+            {
+                continue;
+            }
+
+            var method = attribute.ConstructorArguments[0].Value as string;
+            var route = attribute.ConstructorArguments[1].Value as string;
+            if (string.IsNullOrWhiteSpace(method) || string.IsNullOrWhiteSpace(route))
+            {
+                continue;
+            }
+
+            builder.Add(new EndpointInfo
+            {
+                RequestTypeFqn = requestTypeFqn,
+                RequestDisplayName = requestDisplayName,
+                HttpMethod = method!.Trim().ToUpperInvariant(),
+                Route = route!,
+                Location = location
+            });
+        }
+
+        return builder.ToImmutable();
     }
 
     private static IncrementalValuesProvider<HandlerInfo> MakeHandlerProvider(
@@ -1036,6 +1132,7 @@ namespace AutoDispatch
         ImmutableArray<PreProcessorCandidate> preProcessorCandidates,
         ImmutableArray<PostProcessorCandidate> postProcessorCandidates,
         ImmutableArray<ValidatorInfo> validators,
+        ImmutableArray<EndpointInfo> endpoints,
         Compilation compilation)
     {
         var behaviors = new List<BehaviorInfo>();
@@ -1381,6 +1478,134 @@ namespace AutoDispatch
         {
             context.AddSource("AutoDispatch.Validation.g.cs", GenerateValidationSource());
         }
+
+        GenerateEndpoints(context, endpoints, dispatchMethods, compilation);
+    }
+
+    /// <summary>
+    /// Generates <c>MapAutoDispatchEndpoints(this IEndpointRouteBuilder app)</c> from every
+    /// <c>[Endpoint]</c>-attributed command/query, but only when
+    /// <c>Microsoft.AspNetCore.Routing.IEndpointRouteBuilder</c> is actually referenced by the
+    /// compilation — projects that don't use ASP.NET Core minimal APIs (or don't use
+    /// <c>[Endpoint]</c> at all) pay nothing extra and get no additional generated source.
+    /// </summary>
+    private static void GenerateEndpoints(SourceProductionContext context, ImmutableArray<EndpointInfo> endpoints, IReadOnlyList<DispatchMethodInfo> dispatchMethods, Compilation compilation)
+    {
+        if (endpoints.IsDefaultOrEmpty)
+        {
+            return;
+        }
+
+        var hasAspNetCoreRouting = compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Routing.IEndpointRouteBuilder") is not null;
+        if (!hasAspNetCoreRouting)
+        {
+            return;
+        }
+
+        var methodsByCommandType = dispatchMethods.ToDictionary(static m => m.CommandTypeFqn, StringComparer.Ordinal);
+        var seenRoutes = new Dictionary<string, EndpointInfo>(StringComparer.Ordinal);
+        var resolved = new List<(EndpointInfo Endpoint, DispatchMethodInfo Method)>();
+
+        foreach (var endpoint in endpoints)
+        {
+            var routeKey = endpoint.HttpMethod + " " + endpoint.Route;
+            if (seenRoutes.TryGetValue(routeKey, out _))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(AD031, endpoint.Location, endpoint.HttpMethod, endpoint.Route));
+                continue;
+            }
+
+            seenRoutes[routeKey] = endpoint;
+
+            if (!methodsByCommandType.TryGetValue(endpoint.RequestTypeFqn, out var method))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(AD032, endpoint.Location, endpoint.RequestDisplayName));
+                continue;
+            }
+
+            resolved.Add((endpoint, method));
+        }
+
+        if (resolved.Count == 0)
+        {
+            return;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
+        sb.AppendLine("#nullable enable");
+        sb.AppendLine();
+        sb.AppendLine("namespace AutoDispatch");
+        sb.AppendLine("{");
+        sb.AppendLine("    /// <summary>Maps every [Endpoint]-attributed command/query to an ASP.NET Core minimal API route.</summary>");
+        sb.AppendLine("    public static class AutoDispatchEndpoints");
+        sb.AppendLine("    {");
+        sb.AppendLine("        public static global::Microsoft.AspNetCore.Routing.IEndpointRouteBuilder MapAutoDispatchEndpoints(this global::Microsoft.AspNetCore.Routing.IEndpointRouteBuilder app)");
+        sb.AppendLine("        {");
+
+        foreach (var (endpoint, method) in resolved
+                     .OrderBy(static r => r.Endpoint.Route, StringComparer.Ordinal)
+                     .ThenBy(static r => r.Endpoint.HttpMethod, StringComparer.Ordinal))
+        {
+            var isBodyBound = endpoint.HttpMethod is "POST" or "PUT" or "PATCH";
+            var bindingAttribute = isBodyBound ? "[global::Microsoft.AspNetCore.Mvc.FromBody] " : "[global::Microsoft.AspNetCore.Http.AsParameters] ";
+            var mapMethod = endpoint.HttpMethod switch
+            {
+                "GET" => "MapGet",
+                "POST" => "MapPost",
+                "PUT" => "MapPut",
+                "PATCH" => "MapPatch",
+                "DELETE" => "MapDelete",
+                "HEAD" => "MapMethods",
+                _ => "MapMethods"
+            };
+
+            sb.Append("            app.").Append(mapMethod).Append("(\"").Append(endpoint.Route).Append("\", ");
+            if (mapMethod == "MapMethods")
+            {
+                sb.Append("new[] { \"").Append(endpoint.HttpMethod).Append("\" }, ");
+            }
+
+            sb.AppendLine("async (");
+            sb.Append("                ").Append(bindingAttribute).Append(endpoint.RequestTypeFqn).AppendLine(" request,");
+            sb.AppendLine("                global::AutoDispatch.IDispatcher dispatcher,");
+            sb.AppendLine("                global::System.Threading.CancellationToken ct) =>");
+            sb.AppendLine("            {");
+
+            if (method.IsAsync)
+            {
+                if (method.AsyncResultTypeFqn != null)
+                {
+                    sb.AppendLine("                var response = await dispatcher.SendAsync(request, ct).ConfigureAwait(false);");
+                    sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.Ok(response);");
+                }
+                else
+                {
+                    sb.AppendLine("                await dispatcher.SendAsync(request, ct).ConfigureAwait(false);");
+                    sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.NoContent();");
+                }
+            }
+            else if (method.ReturnTypeFqn == "void")
+            {
+                sb.AppendLine("                dispatcher.Send(request);");
+                sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.NoContent();");
+            }
+            else
+            {
+                sb.AppendLine("                var response = dispatcher.Send(request);");
+                sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.Ok(response);");
+            }
+
+            sb.AppendLine("            });");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("            return app;");
+        sb.AppendLine("        }");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+
+        context.AddSource("AutoDispatch.Endpoints.g.cs", sb.ToString());
     }
 
     /// <summary>
@@ -3945,6 +4170,19 @@ namespace AutoDispatch
         public string ValidatorTypeFqn { get; set; } = string.Empty;
 
         public string RequestTypeFqn { get; set; } = string.Empty;
+
+        public Location Location { get; set; } = Location.None;
+    }
+
+    private sealed class EndpointInfo
+    {
+        public string RequestTypeFqn { get; set; } = string.Empty;
+
+        public string RequestDisplayName { get; set; } = string.Empty;
+
+        public string HttpMethod { get; set; } = string.Empty;
+
+        public string Route { get; set; } = string.Empty;
 
         public Location Location { get; set; } = Location.None;
     }

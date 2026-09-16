@@ -6,5 +6,6 @@
   <Project Path="benchmarks/AutoDispatch.Benchmarks/AutoDispatch.Benchmarks.csproj" />
   <Project Path="benchmarks/AutoDispatch.Benchmarks.Pipeline/AutoDispatch.Benchmarks.Pipeline.csproj" />
   <Project Path="samples/AutoDispatch.AotSample/AutoDispatch.AotSample.csproj" />
+  <Project Path="samples/AutoDispatch.MinimalApiSample/AutoDispatch.MinimalApiSample.csproj" />
   <Project Path="tests/AutoDispatch.Tests/AutoDispatch.Tests.csproj" />
 </Solution>

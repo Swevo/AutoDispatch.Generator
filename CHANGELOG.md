@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.19.0] - 2026-09-16
+
+### Added
+- **Minimal API endpoint generation** — mark a command or query type `[Endpoint("POST", "/orders")]` and AutoDispatch generates a `MapAutoDispatchEndpoints(this IEndpointRouteBuilder app)` extension method wiring it straight to an ASP.NET Core minimal API route, dispatched through the generated `IDispatcher` — no hand-written `MapPost`/`MapGet` lambda required
+- `POST`/`PUT`/`PATCH` bind the request from the body (`[FromBody]`); `GET`/`HEAD`/`DELETE` bind it from the route/query string (`[AsParameters]`), matching standard ASP.NET Core minimal API conventions; async handlers with a result return `200 OK`, handlers with no result return `204 No Content`
+- New `AD031` (error: duplicate method+route) and `AD032` (warning: `[Endpoint]` on a type nothing dispatches) diagnostics
+- Entirely opt-in and zero-cost when unused: nothing is generated unless the compilation both uses `[Endpoint]` *and* references `Microsoft.AspNetCore.Routing`
+- New `samples/AutoDispatch.MinimalApiSample` — a complete, runnable ASP.NET Core project demonstrating the feature end-to-end (verified locally: `dotnet run` + live POST/GET/DELETE requests all succeed)
+- README: new "Minimal API endpoint generation" section, diagnostics table rows, feature bullet
+- 7 new tests covering: no-op when `[Endpoint]` unused, no-op when ASP.NET Core routing isn't referenced, generated source shape for body-bound and route-bound requests, duplicate-route diagnostic, unmatched-handler diagnostic, and void-handler `204 No Content` response; 156/156 passing solution-wide (Debug + Release)
+
 ## [1.18.0] - 2026-09-16
 
 ### Added

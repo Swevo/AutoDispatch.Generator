@@ -24,6 +24,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Automatic MediatR migration hints** — if MediatR is still referenced, AutoDispatch reports an `AD100`/`AD101` suggestion with a one-click fix that converts a handler to `[Handler]`/`[NotificationHandler]` for you
 - **Automatic FluentValidation integration** — reference FluentValidation and validators are auto-registered and auto-invoked before every async handler runs, no attribute or manual DI wiring needed
 - **Pipeline visualization** — every generated pipeline is also rendered as a Mermaid flowchart, available at compile time via `AutoDispatchPipelineDiagrams`, for pasting into docs/ADRs
+- **Minimal API endpoint generation** — `[Endpoint("POST", "/orders")]` on a command/query type generates a `MapAutoDispatchEndpoints()` extension method that wires it directly to an ASP.NET Core minimal API route, no hand-written lambda needed
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated; see the [Native AOT sample](samples/AutoDispatch.AotSample) for a project that publishes with `PublishAot=true` and zero trim/AOT analyzer warnings
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -209,6 +210,49 @@ services.AddScoped<CreateOrderHandler>();
 services.AddScoped<DeleteOrderHandler>();
 services.AddScoped<AutoDispatch.IDispatcher, AutoDispatch.Dispatcher>();
 ```
+
+## Minimal API endpoint generation
+
+Mark a command or query type `[Endpoint(method, route)]` to wire it directly to an ASP.NET Core minimal API route — no hand-written `MapPost`/`MapGet` lambda required:
+
+```csharp
+[Endpoint("POST", "/orders")]
+public sealed record CreateOrderCommand(string CustomerId);
+
+[Endpoint("GET", "/orders/{id}")]
+public sealed record GetOrderQuery(Guid Id);
+
+[Endpoint("DELETE", "/orders/{id}")]
+public sealed record DeleteOrderCommand(Guid Id);
+```
+
+Then map every attributed endpoint in one line:
+
+```csharp
+app.MapAutoDispatchEndpoints();
+```
+
+This generates something like:
+
+```csharp
+app.MapPost("/orders", async ([FromBody] CreateOrderCommand request, IDispatcher dispatcher, CancellationToken ct) =>
+{
+    var response = await dispatcher.SendAsync(request, ct);
+    return Results.Ok(response);
+});
+
+app.MapGet("/orders/{id}", async ([AsParameters] GetOrderQuery request, IDispatcher dispatcher, CancellationToken ct) =>
+{
+    var response = await dispatcher.SendAsync(request, ct);
+    return Results.Ok(response);
+});
+```
+
+- `POST`/`PUT`/`PATCH` bind the request type from the body (`[FromBody]`); `GET`/`HEAD`/`DELETE` bind it from the route/query string (`[AsParameters]`), matching standard ASP.NET Core minimal API conventions
+- Async handlers with a result return `200 OK` with the response body; handlers with no result (`Task`/`void`) return `204 No Content`
+- `AD031` (error) if two `[Endpoint]`s map the same HTTP method + route; `AD032` (warning) if `[Endpoint]` is applied to a type that no `[Handler]`/`[CommandHandler]`/`[QueryHandler]` actually dispatches
+- Nothing is generated at all unless the compilation references `Microsoft.AspNetCore.Routing` (e.g. an ASP.NET Core project) — a class library with `[Endpoint]` attributes but no ASP.NET Core reference pays zero cost
+- See [`samples/AutoDispatch.MinimalApiSample`](samples/AutoDispatch.MinimalApiSample) for a complete, runnable ASP.NET Core project using this feature
 
 ## Tracing (OpenTelemetry-compatible)
 
@@ -771,6 +815,8 @@ onboarding docs, or PR descriptions when adding a new behavior to a pipeline.
 | AD028 | Error | `[NotificationBehavior]` type is not a public, non-abstract open generic class with exactly one type parameter |
 | AD029 | Error | `[NotificationBehavior]` type does not implement `INotificationPipelineBehavior<TNotification>` |
 | AD030 | Error | `[NotificationBehavior]` type does not expose a valid public `HandleAsync` method |
+| AD031 | Error | Two `[Endpoint]` declarations map the same HTTP method + route |
+| AD032 | Warning | `[Endpoint]` is applied to a type that no `[Handler]`/`[CommandHandler]`/`[QueryHandler]` actually dispatches |
 
 ### AD001
 
