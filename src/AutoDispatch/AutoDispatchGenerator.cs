@@ -2310,6 +2310,10 @@ namespace AutoDispatch
                     sb.AppendLine($"                await _inner.{methodName}(command, ct).ConfigureAwait(false);");
                 }
             }
+            else if (interfaceReturn == "void")
+            {
+                sb.AppendLine($"                _inner.{methodName}(command);");
+            }
             else
             {
                 sb.AppendLine($"                return _inner.{methodName}(command);");

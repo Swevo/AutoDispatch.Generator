@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.18.0] - 2026-09-16
+
+### Added
+- **Native AOT sample** — new `samples/AutoDispatch.AotSample` console project demonstrating that AutoDispatch-based apps publish cleanly with Native AOT (`PublishAot=true`) with zero trim/AOT analyzer warnings, since the generator never emits reflection, `Assembly.GetTypes()` scanning, or dynamic proxies
+- New "Native AOT" README section and badge linking to the sample
+
+### Fixed
+- **`TracingDispatcher` compile error for sync `void` command handlers** — the always-generated `TracingDispatcher` decorator (emitted regardless of whether `EnableTracing` is ever turned on) produced `return _inner.Send(command);` for commands whose `Handle` method returns `void`, which is a `CS0127` compile error. Any project with at least one sync, non-value-returning command handler failed to build. Found via the new Native AOT sample; fixed by emitting a plain statement (no `return`) when the dispatch method's interface return type is `void`
+- Added a regression test (`TracingDispatcher_SyncVoidCommand_CompilesWithoutReturningVoidValue`) covering this case at the compiled-assembly level
+
 ## [1.17.0] - 2026-09-16
 
 ### Added

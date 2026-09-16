@@ -3161,6 +3161,38 @@ public sealed class CreateOrderHandler
         Assert.Equal(ActivityStatusCode.Error, activity.Status);
     }
 
+    [Fact]
+    public void TracingDispatcher_SyncVoidCommand_CompilesWithoutReturningVoidValue()
+    {
+        // Regression test: TracingDispatcher is generated unconditionally (even when tracing is
+        // never enabled at runtime), so a sync command handler with a void Handle(...) method
+        // used to produce "return _inner.Send(command);" for a method whose interface return
+        // type is void, which is a compile error (CS0127). Discovered via the Native AOT sample.
+        const string source = @"
+using AutoDispatch;
+
+public sealed class DeleteOrderCommand { }
+
+[Handler]
+public sealed class DeleteOrderHandler
+{
+    public void Handle(DeleteOrderCommand command)
+    {
+    }
+}";
+
+        using var compiled = CompileAssembly(source);
+        var tracingDispatcherType = compiled.Assembly.GetType("AutoDispatch.TracingDispatcher", throwOnError: true)!;
+        var dispatcherType = compiled.Assembly.GetType("AutoDispatch.Dispatcher", throwOnError: true)!;
+        var innerDispatcher = Activator.CreateInstance(dispatcherType, new ReflectionServiceProvider())!;
+        var tracingDispatcher = Activator.CreateInstance(tracingDispatcherType, innerDispatcher)!;
+        var commandType = compiled.Assembly.GetType("DeleteOrderCommand", throwOnError: true)!;
+        var send = tracingDispatcherType.GetMethod("Send", BindingFlags.Instance | BindingFlags.Public)!;
+
+        Assert.Equal(typeof(void), send.ReturnType);
+        send.Invoke(tracingDispatcher, new object[] { Activator.CreateInstance(commandType)! });
+    }
+
     // ---- Notification pipeline behaviors ([NotificationBehavior]) ----
 
     [Fact]

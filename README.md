@@ -5,6 +5,7 @@
 [![CI](https://github.com/Swevo/AutoDispatch.Generator/actions/workflows/build.yml/badge.svg)](https://github.com/Swevo/AutoDispatch.Generator/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![.NET 10 Ready](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet)](#)
+[![Native AOT](https://img.shields.io/badge/Native%20AOT-compatible-512BD4?logo=dotnet)](samples/AutoDispatch.AotSample)
 
 AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T>`, `IRequestHandler<,>`, reflection, or runtime dispatch overhead. Mark a handler with `[Handler]`, write `Handle` or `HandleAsync`, and the generator emits a strongly-typed dispatcher at build time.
 
@@ -24,7 +25,7 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Automatic FluentValidation integration** — reference FluentValidation and validators are auto-registered and auto-invoked before every async handler runs, no attribute or manual DI wiring needed
 - **Pipeline visualization** — every generated pipeline is also rendered as a Mermaid flowchart, available at compile time via `AutoDispatchPipelineDiagrams`, for pasting into docs/ADRs
 - **No marker interfaces** — commands stay as plain POCOs
-- **AOT-friendly** — everything is compile-time generated
+- **AOT-friendly** — everything is compile-time generated; see the [Native AOT sample](samples/AutoDispatch.AotSample) for a project that publishes with `PublishAot=true` and zero trim/AOT analyzer warnings
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
 
 ## Installation
@@ -231,6 +232,17 @@ With tracing enabled, `IDispatcher` resolves to a generated `TracingDispatcher` 
 - For streams, keeps the `Activity` open for the whole enumeration and records an error status if any `MoveNextAsync()` call throws
 
 Tracing is **opt-in and pay-for-play**: `EnableTracing` defaults to `false`, so the plain `Dispatcher` is registered and there is no decorator, no extra virtual call, and no `Activity` allocation unless you turn it on. Even when enabled, if nothing is listening to the `"AutoDispatch"` source, `ActivitySource.StartActivity(...)` returns `null` and every `activity?.` call below is a no-op — the cost is one extra method call on the hot path, not a full tracing pipeline.
+
+## Native AOT
+
+AutoDispatch has no reflection, no `Assembly.GetTypes()` scanning, and no dynamic proxies anywhere in its generated output — every handler/behavior/DI registration is plain C# emitted at build time. That makes it fully compatible with [Native AOT](https://learn.microsoft.com/dotnet/core/deploying/native-aot) publishing out of the box.
+
+See the [`samples/AutoDispatch.AotSample`](samples/AutoDispatch.AotSample) project for a minimal console app that:
+
+- Sets `<PublishAot>true</PublishAot>`, `<EnableTrimAnalyzer>true</EnableTrimAnalyzer>`, and `<EnableAotAnalyzer>true</EnableAotAnalyzer>`
+- Builds and publishes with **zero trim/AOT analyzer warnings**
+- Runs a command handler, a query handler, and a void command handler end-to-end through the generated `IDispatcher`
+
 
 ## Pipeline behaviors
 
