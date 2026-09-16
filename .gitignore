@@ -7,3 +7,6 @@ test-results/
 *.snupkg
 
 BenchmarkDotNet.Artifacts/
+
+# Scratch file used for multi-line git commit messages (never intended to be tracked)
+.git-commit-msg.txt
