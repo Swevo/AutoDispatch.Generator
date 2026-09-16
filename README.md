@@ -21,6 +21,8 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Built-in OpenTelemetry-compatible tracing** — opt in with `AddAutoDispatch(o => o.EnableTracing = true)` to wrap every `SendAsync`/`PublishAsync`/`StreamAsync` call in an `Activity`, with zero overhead when no listener is subscribed
 - **Notification pipeline behaviors** — `[NotificationBehavior(Order = N)]` wraps the entire `PublishAsync` fan-out for a notification type, something MediatR has no equivalent for
 - **Automatic MediatR migration hints** — if MediatR is still referenced, AutoDispatch reports an `AD100`/`AD101` suggestion with a one-click fix that converts a handler to `[Handler]`/`[NotificationHandler]` for you
+- **Automatic FluentValidation integration** — reference FluentValidation and validators are auto-registered and auto-invoked before every async handler runs, no attribute or manual DI wiring needed
+- **Pipeline visualization** — every generated pipeline is also rendered as a Mermaid flowchart, available at compile time via `AutoDispatchPipelineDiagrams`, for pasting into docs/ADRs
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -667,6 +669,61 @@ Conventions:
   post-processors (in `Order`, receiving the handler's response) — for void-async handlers the
   response is `Unit.Value`.
 - With no `[PreProcessor]`/`[PostProcessor]`s registered, dispatch codegen is unchanged.
+
+### Automatic FluentValidation integration
+
+If your project references [FluentValidation](https://www.nuget.org/packages/FluentValidation),
+AutoDispatch automatically wires validation into every async command's pipeline — **no attribute,
+base class, or manual registration required** on the command or the validator:
+
+```csharp
+using FluentValidation;
+
+public sealed class CreateOrderCommandValidator : AbstractValidator<CreateOrderCommand>
+{
+    public CreateOrderCommandValidator()
+    {
+        RuleFor(c => c.CustomerId).NotEmpty();
+        RuleFor(c => c.Quantity).GreaterThan(0);
+    }
+}
+```
+
+That's it — no `[PreProcessor]`, no `services.AddScoped<IValidator<...>, ...>()`, no
+`AddValidatorsFromAssembly`. As soon as FluentValidation is referenced:
+
+- Every `AbstractValidator<T>`/`IValidator<T>` implementation found anywhere in the compilation is
+  auto-registered in DI as `IValidator<T>`.
+- A single generated open-generic pre-processor (`AutoDispatchValidationPreProcessor<TCommand>`)
+  runs **first**, before any other `[PreProcessor]`/`[Behavior]`, resolving every registered
+  `IValidator<TCommand>` for the command being dispatched and throwing FluentValidation's own
+  `ValidationException` on the first failure.
+- Commands with no matching validator pay only a single empty-enumerable iteration — effectively
+  free.
+- Like other pre-processors, this only applies to **async** handlers (`Handle`/`HandleAsync`
+  returning `Task`/`Task<T>`); synchronous handlers are unaffected.
+- Without a FluentValidation reference, nothing changes — no extra generated code, no extra DI
+  registrations, exactly the same output as before this feature existed.
+
+## Pipeline visualization (Mermaid diagrams)
+
+Every generated dispatch pipeline — commands, queries, and notifications, including any
+`[Behavior]`/`[PreProcessor]`/`[PostProcessor]`/exception middleware attached to it — is also
+rendered as a [Mermaid](https://mermaid.js.org/) flowchart and exposed at compile time via a
+generated `AutoDispatchPipelineDiagrams` static class:
+
+```csharp
+// Paste straight into https://mermaid.live or any Mermaid-aware Markdown viewer
+string diagram = AutoDispatchPipelineDiagrams.ByRequestType["CreateOrderCommand"];
+
+// Or get every pipeline in the project combined into one flowchart
+string everything = AutoDispatchPipelineDiagrams.All;
+```
+
+This is purely descriptive (a dictionary of `string`s with zero runtime cost beyond the constant
+allocation) — a handy way to document exactly what happens, and in what order, for a given
+command/query/notification without reading generated code, and a nice fit for pasting into ADRs,
+onboarding docs, or PR descriptions when adding a new behavior to a pipeline.
 
 ## Diagnostics
 

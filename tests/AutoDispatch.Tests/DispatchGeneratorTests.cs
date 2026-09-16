@@ -49,12 +49,14 @@ namespace Microsoft.Extensions.DependencyInjection
 }
 ";
 
-    private static Dictionary<string, string> RunGenerator(string userSource, out ImmutableArray<Diagnostic> diagnostics)
+    internal static Dictionary<string, string> RunGenerator(string userSource, out ImmutableArray<Diagnostic> diagnostics)
     {
         var result = RunGeneratorResult(userSource);
         diagnostics = result.Diagnostics;
         return result.Sources;
     }
+
+    internal static GenerationResult RunGeneratorForDebug(string userSource) => RunGeneratorResult(userSource);
 
     private static GenerationResult RunGeneratorResult(string userSource)
     {
@@ -159,7 +161,7 @@ namespace Microsoft.Extensions.DependencyInjection
         return new CompiledAssembly(loadContext, assembly);
     }
 
-    private sealed class GenerationResult
+    internal sealed class GenerationResult
     {
         public GenerationResult(
             Dictionary<string, string> sources,

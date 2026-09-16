@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.17.0] - 2026-09-16
+
+### Added
+- **Automatic FluentValidation integration** — referencing FluentValidation is now enough on its own: every `IValidator<T>`/`AbstractValidator<T>` found anywhere in the compilation is auto-registered in DI as `IValidator<T>`, and a single generated open-generic pre-processor (`AutoDispatchValidationPreProcessor<TCommand>`) runs first in every async command's pipeline, resolving and running every matching validator and throwing FluentValidation's own `ValidationException` on the first failure — no `[PreProcessor]`, no manual DI registration, no `AddValidatorsFromAssembly` needed
+- Commands with no matching validator pay only a single empty-enumerable iteration; projects that don't reference FluentValidation get exactly the same generated output as before this feature existed
+- **Pipeline visualization (Mermaid diagrams)** — every generated dispatch pipeline (commands, queries, notifications, including any attached behaviors/processors/exception middleware) is now also rendered as a Mermaid flowchart and exposed via a generated `AutoDispatchPipelineDiagrams` static class (`ByRequestType` dictionary plus an `All` combined diagram), ready to paste into `https://mermaid.live`, ADRs, or PR descriptions — purely descriptive, zero runtime behavior
+- README: new "Automatic FluentValidation integration" and "Pipeline visualization (Mermaid diagrams)" sections, two new feature bullets in "Why AutoDispatch?"
+- 10 new tests (5 for pipeline diagrams: no-handlers/single-command/behavior/notification-fan-out/`All` combined; 5 for FluentValidation: no-reference no-op, generated pre-processor source, dispatcher wiring, DI auto-registration, sync-handler exclusion); 148/148 passing solution-wide (Debug + Release)
+
+### Fixed
+- Cleaned up build-time analyzer warnings from the AD100/AD101 `MediatRMigrationAnalyzer` introduced in 1.16.0: added `AnalyzerReleases.Shipped.md`/`Unshipped.md` release-tracking files, and suppressed the expected/accepted `RS1038`/`RS1036` warnings (the code fix provider legitimately needs `Microsoft.CodeAnalysis.Editing`'s `DocumentEditor`, which only runs inside an IDE/build-time workspace host, never a bare command-line compilation)
+
 ## [1.16.0] - 2026-09-16
 
 ### Added

@@ -644,17 +644,77 @@ namespace AutoDispatch
 
         var processors = preProcessors.Combine(postProcessors);
 
-        var allInputs = handlers.Combine(behaviors).Combine(notifications).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors).Combine(context.CompilationProvider);
+        // FluentValidation integration: unlike every other provider above, this one is not gated
+        // behind an AutoDispatch attribute — it looks for ordinary FluentValidation validator
+        // classes (concrete types implementing FluentValidation.IValidator<T>) anywhere in the
+        // compilation, with no attribute or base-class requirement from AutoDispatch's side. The
+        // syntactic predicate (a public, non-abstract class with a base list) is intentionally
+        // cheap so this costs nothing extra for compilations that don't reference FluentValidation
+        // at all — TransformValidator bails out on the first GetTypeByMetadataName lookup in that
+        // case, before doing any interface-matching work.
+        var validators = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                predicate: static (node, _) => node is ClassDeclarationSyntax
+                {
+                    BaseList: not null
+                } classDeclaration &&
+                !classDeclaration.Modifiers.Any(static m => m.ValueText == "abstract"),
+                transform: static (ctx, ct) => TransformValidator(ctx, ct))
+            .Where(static v => v is not null)
+            .Select(static (v, _) => v!)
+            .Collect();
+
+        var allInputs = handlers.Combine(behaviors).Combine(notifications).Combine(streamHandlers).Combine(streamBehaviors).Combine(exceptionMiddleware).Combine(processors).Combine(validators).Combine(context.CompilationProvider);
 
         context.RegisterSourceOutput(allInputs, static (ctx, tuple) =>
         {
-            var (((((((handlersTuple, behaviorList), notificationsTuple), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple), compilation) = tuple;
+            var ((((((((handlersTuple, behaviorList), notificationsTuple), streamList), streamBehaviorList), exceptionMiddlewareTuple), processorsTuple), validatorList), compilation) = tuple;
             var ((h1, h2), h3) = handlersTuple;
             var (notificationList, notificationBehaviorList) = notificationsTuple;
             var (exceptionHandlerList, exceptionActionList) = exceptionMiddlewareTuple;
             var (preProcessorList, postProcessorList) = processorsTuple;
-            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, notificationBehaviorList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList, compilation);
+            Generate(ctx, h1.AddRange(h2).AddRange(h3), behaviorList, notificationList, notificationBehaviorList, streamList, streamBehaviorList, exceptionHandlerList, exceptionActionList, preProcessorList, postProcessorList, validatorList, compilation);
         });
+    }
+
+    private static ValidatorInfo? TransformValidator(GeneratorSyntaxContext context, CancellationToken cancellationToken)
+    {
+        var validatorInterface = context.SemanticModel.Compilation.GetTypeByMetadataName("FluentValidation.IValidator`1");
+        if (validatorInterface is null)
+        {
+            // FluentValidation isn't referenced by this compilation at all — bail out before any
+            // further (and comparatively more expensive) symbol/interface inspection.
+            return null;
+        }
+
+        if (context.Node is not ClassDeclarationSyntax classDeclaration)
+        {
+            return null;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (context.SemanticModel.GetDeclaredSymbol(classDeclaration, cancellationToken) is not INamedTypeSymbol typeSymbol ||
+            typeSymbol.DeclaredAccessibility != Accessibility.Public)
+        {
+            return null;
+        }
+
+        foreach (var iface in typeSymbol.AllInterfaces)
+        {
+            if (iface.TypeArguments.Length == 1 &&
+                SymbolEqualityComparer.Default.Equals(iface.OriginalDefinition, validatorInterface))
+            {
+                return new ValidatorInfo
+                {
+                    ValidatorTypeFqn = ToFullyQualified(typeSymbol),
+                    RequestTypeFqn = ToFullyQualified(iface.TypeArguments[0]),
+                    Location = typeSymbol.Locations.FirstOrDefault() ?? Location.None
+                };
+            }
+        }
+
+        return null;
     }
 
     private static IncrementalValuesProvider<HandlerInfo> MakeHandlerProvider(
@@ -975,6 +1035,7 @@ namespace AutoDispatch
         ImmutableArray<ExceptionActionCandidate> exceptionActionCandidates,
         ImmutableArray<PreProcessorCandidate> preProcessorCandidates,
         ImmutableArray<PostProcessorCandidate> postProcessorCandidates,
+        ImmutableArray<ValidatorInfo> validators,
         Compilation compilation)
     {
         var behaviors = new List<BehaviorInfo>();
@@ -1077,6 +1138,32 @@ namespace AutoDispatch
             }
 
             postProcessors.Add(candidate.PostProcessor);
+        }
+
+        // De-duplicate validators (a class could theoretically be discovered twice via partial
+        // declarations) and only wire up the automatic validation pre-processor when
+        // FluentValidation is actually referenced — this entire block is a no-op, and generates
+        // no additional source at all, for any project that doesn't reference it.
+        var seenValidatorTypes = new HashSet<string>(StringComparer.Ordinal);
+        var dedupedValidators = validators
+            .Where(v => seenValidatorTypes.Add(v.ValidatorTypeFqn))
+            .OrderBy(static v => v.ValidatorTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+        var hasFluentValidation = compilation.GetTypeByMetadataName("FluentValidation.IValidator`1") is not null;
+
+        if (hasFluentValidation)
+        {
+            // Runs before every other pre-processor (Order = int.MinValue) so validation always
+            // happens first. It is registered as an open generic — `IEnumerable<IValidator<TCommand>>`
+            // resolves to zero validators (a harmless no-op) for any command that has none.
+            preProcessors.Add(new PreProcessorInfo
+            {
+                UnboundTypeFqn = "global::AutoDispatch.Generated.AutoDispatchValidationPreProcessor<>",
+                Order = int.MinValue,
+                SortFilePath = string.Empty,
+                SortSpanStart = 0,
+                Location = Location.None
+            });
         }
 
         var streamBehaviors = new List<StreamBehaviorInfo>();
@@ -1287,7 +1374,314 @@ namespace AutoDispatch
         }
 
         context.AddSource("AutoDispatch.Dispatcher.g.cs", GenerateDispatcherSource(dispatchMethods, behaviors, notificationGroups, notificationBehaviors, streamMethods, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors, compilation));
-        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, notificationBehaviors, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors));
+        context.AddSource("AutoDispatch.Registration.g.cs", GenerateRegistrationSource(registrations, behaviors, notificationBehaviors, streamBehaviors, exceptionHandlers, exceptionActions, preProcessors, postProcessors, dedupedValidators));
+        context.AddSource("AutoDispatch.PipelineDiagrams.g.cs", GeneratePipelineDiagramSource(dispatchMethods, behaviors, notificationGroups, notificationBehaviors, streamMethods, streamBehaviors, preProcessors, postProcessors, exceptionHandlers.Count > 0 || exceptionActions.Count > 0, compilation));
+
+        if (hasFluentValidation)
+        {
+            context.AddSource("AutoDispatch.Validation.g.cs", GenerateValidationSource());
+        }
+    }
+
+    /// <summary>
+    /// The single open-generic pre-processor that powers automatic FluentValidation integration.
+    /// Registered (see <see cref="GenerateRegistrationSource"/>) and applied (see the synthetic
+    /// entry added to <c>preProcessors</c> in <see cref="Generate"/>) for every command whenever
+    /// FluentValidation is referenced by the consuming project — no attribute or opt-in required
+    /// on the command or validator itself. Resolves every <c>IValidator&lt;TCommand&gt;</c>
+    /// registered in DI for the command being dispatched (there may be zero, one, or several,
+    /// since FluentValidation supports composing multiple validators per type) and throws
+    /// <c>FluentValidation.ValidationException</c> on the first one that reports a failure.
+    /// </summary>
+    private static string GenerateValidationSource()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
+        sb.AppendLine("#nullable enable");
+        sb.AppendLine("namespace AutoDispatch.Generated");
+        sb.AppendLine("{");
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// Automatically applied to every command as a pre-processor because this project references");
+        sb.AppendLine("    /// FluentValidation. Runs every registered <c>FluentValidation.IValidator&lt;TCommand&gt;</c> for");
+        sb.AppendLine("    /// the command being dispatched before the handler executes, throwing");
+        sb.AppendLine("    /// <c>FluentValidation.ValidationException</c> on the first failure. Commands with no matching");
+        sb.AppendLine("    /// validator registered pay only a single empty-enumerable iteration.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine("    public sealed class AutoDispatchValidationPreProcessor<TCommand> : global::AutoDispatch.IPreProcessor<TCommand>");
+        sb.AppendLine("    {");
+        sb.AppendLine("        private readonly global::System.Collections.Generic.IEnumerable<global::FluentValidation.IValidator<TCommand>> _validators;");
+        sb.AppendLine();
+        sb.AppendLine("        public AutoDispatchValidationPreProcessor(global::System.Collections.Generic.IEnumerable<global::FluentValidation.IValidator<TCommand>> validators) => _validators = validators;");
+        sb.AppendLine();
+        sb.AppendLine("        public async global::System.Threading.Tasks.Task ProcessAsync(TCommand command, global::System.Threading.CancellationToken ct)");
+        sb.AppendLine("        {");
+        sb.AppendLine("            foreach (var validator in _validators)");
+        sb.AppendLine("            {");
+        sb.AppendLine("                var result = await validator.ValidateAsync(command, ct).ConfigureAwait(false);");
+        sb.AppendLine("                if (!result.IsValid)");
+        sb.AppendLine("                {");
+        sb.AppendLine("                    throw new global::FluentValidation.ValidationException(result.Errors);");
+        sb.AppendLine("                }");
+        sb.AppendLine("            }");
+        sb.AppendLine("        }");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Renders a Mermaid flowchart for every generated dispatch pipeline (commands, queries, and
+    /// notifications) so consumers can paste the diagram straight into docs, ADRs, or
+    /// https://mermaid.live to see exactly what runs, and in what order, for a given
+    /// command/query/notification — without reading generated code. This is purely descriptive
+    /// output (a dictionary of strings); it has no runtime behavior of its own.
+    /// </summary>
+    private static string GeneratePipelineDiagramSource(
+        IReadOnlyList<DispatchMethodInfo> methods,
+        IReadOnlyList<BehaviorInfo> behaviors,
+        IReadOnlyList<NotificationGroup> notificationGroups,
+        IReadOnlyList<NotificationBehaviorInfo> notificationBehaviors,
+        IReadOnlyList<StreamMethodInfo> streamMethods,
+        IReadOnlyList<StreamBehaviorInfo> streamBehaviors,
+        IReadOnlyList<PreProcessorInfo> preProcessors,
+        IReadOnlyList<PostProcessorInfo> postProcessors,
+        bool hasExceptionMiddleware,
+        Compilation compilation)
+    {
+        var allBehaviors = behaviors
+            .OrderBy(static b => b.Order)
+            .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static b => b.SortSpanStart)
+            .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+
+        var allStreamBehaviors = streamBehaviors
+            .OrderBy(static b => b.Order)
+            .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static b => b.SortSpanStart)
+            .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+
+        var allNotificationBehaviors = notificationBehaviors
+            .OrderBy(static b => b.Order)
+            .ThenBy(static b => b.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static b => b.SortSpanStart)
+            .ThenBy(static b => b.UnboundTypeFqn, StringComparer.Ordinal)
+            .Select(static b => GetShortTypeName(b.UnboundTypeFqn))
+            .ToArray();
+
+        var allPreProcessors = preProcessors
+            .OrderBy(static p => p.Order)
+            .ThenBy(static p => p.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static p => p.SortSpanStart)
+            .ThenBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+
+        var allPostProcessors = postProcessors
+            .OrderBy(static p => p.Order)
+            .ThenBy(static p => p.SortFilePath, StringComparer.Ordinal)
+            .ThenBy(static p => p.SortSpanStart)
+            .ThenBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal)
+            .ToArray();
+
+        var entries = new List<(string Key, string Diagram)>();
+        var usedKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        string MakeKey(string shortName)
+        {
+            var key = shortName;
+            var suffix = 2;
+            while (!usedKeys.Add(key))
+            {
+                key = shortName + "_" + suffix++;
+            }
+
+            return key;
+        }
+
+        foreach (var method in methods)
+        {
+            var stepBehaviors = allBehaviors
+                .Where(b => CommandSatisfiesConstraints(compilation, method.CommandTypeFqn, b.CommandConstraintTypeFqns))
+                .Select(static b => GetShortTypeName(b.UnboundTypeFqn))
+                .ToArray();
+            var stepPre = allPreProcessors
+                .Where(p => CommandSatisfiesConstraints(compilation, method.CommandTypeFqn, p.CommandConstraintTypeFqns))
+                .Select(static p => GetShortTypeName(p.UnboundTypeFqn))
+                .ToArray();
+            var stepPost = allPostProcessors
+                .Where(p => CommandSatisfiesConstraints(compilation, method.CommandTypeFqn, p.CommandConstraintTypeFqns))
+                .Select(static p => GetShortTypeName(p.UnboundTypeFqn))
+                .ToArray();
+
+            var diagram = BuildRequestPipelineDiagram(
+                GetShortTypeName(method.CommandTypeFqn),
+                GetShortTypeName(method.HandlerTypeFqn),
+                stepPre,
+                stepBehaviors,
+                stepPost,
+                hasExceptionMiddleware);
+
+            entries.Add((MakeKey(GetShortTypeName(method.CommandTypeFqn)), diagram));
+        }
+
+        foreach (var method in streamMethods)
+        {
+            var stepBehaviors = allStreamBehaviors
+                .Where(b => CommandSatisfiesConstraints(compilation, method.QueryTypeFqn, b.QueryConstraintTypeFqns))
+                .Select(static b => GetShortTypeName(b.UnboundTypeFqn))
+                .ToArray();
+
+            var diagram = BuildRequestPipelineDiagram(
+                GetShortTypeName(method.QueryTypeFqn),
+                GetShortTypeName(method.HandlerTypeFqn),
+                Array.Empty<string>(),
+                stepBehaviors,
+                Array.Empty<string>(),
+                hasExceptionMiddleware);
+
+            entries.Add((MakeKey(GetShortTypeName(method.QueryTypeFqn)), diagram));
+        }
+
+        foreach (var group in notificationGroups)
+        {
+            var handlerNames = group.Methods.Select(static m => GetShortTypeName(m.HandlerTypeFqn)).ToArray();
+            var diagram = BuildNotificationPipelineDiagram(
+                GetShortTypeName(group.NotificationTypeFqn),
+                allNotificationBehaviors,
+                handlerNames,
+                group.ParallelPublish);
+
+            entries.Add((MakeKey(GetShortTypeName(group.NotificationTypeFqn)), diagram));
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
+        sb.AppendLine("#nullable enable");
+        sb.AppendLine("namespace AutoDispatch");
+        sb.AppendLine("{");
+        sb.AppendLine("    /// <summary>");
+        sb.AppendLine("    /// Mermaid flowchart source for every generated dispatch pipeline (commands, queries, and");
+        sb.AppendLine("    /// notifications), keyed by short type name. Paste any entry into https://mermaid.live or a");
+        sb.AppendLine("    /// Mermaid-aware Markdown viewer to see exactly what runs, and in what order, without");
+        sb.AppendLine("    /// reading generated code. Purely descriptive — no runtime behavior.");
+        sb.AppendLine("    /// </summary>");
+        sb.AppendLine("    public static class AutoDispatchPipelineDiagrams");
+        sb.AppendLine("    {");
+        sb.AppendLine("        public static global::System.Collections.Generic.IReadOnlyDictionary<string, string> ByRequestType { get; } = new global::System.Collections.Generic.Dictionary<string, string>");
+        sb.AppendLine("        {");
+
+        foreach (var (key, diagram) in entries)
+        {
+            sb.Append("            [\"");
+            sb.Append(key);
+            sb.AppendLine("\"] =");
+            sb.AppendLine("@\"" + diagram.Replace("\"", "\"\"") + "\",");
+        }
+
+        sb.AppendLine("        };");
+        sb.AppendLine();
+        sb.AppendLine("        /// <summary>All registered pipelines combined into a single Mermaid flowchart.</summary>");
+        sb.AppendLine("        public static string All { get; } =");
+        var combined = entries.Count == 0
+            ? "graph LR\n    NoPipelines[No AutoDispatch handlers found]"
+            : string.Join("\n\n", entries.Select(e => "%% " + e.Key + "\n" + e.Diagram));
+        sb.AppendLine("@\"" + combined.Replace("\"", "\"\"") + "\";");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+
+        return sb.ToString();
+    }
+
+    private static string BuildRequestPipelineDiagram(
+        string requestShortName,
+        string handlerShortName,
+        IReadOnlyList<string> preProcessorNames,
+        IReadOnlyList<string> behaviorNames,
+        IReadOnlyList<string> postProcessorNames,
+        bool hasExceptionMiddleware)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("graph LR");
+
+        var nodes = new List<string>();
+        var nodeId = 0;
+        string NextId() => "N" + nodeId++;
+
+        var callerId = NextId();
+        sb.Append("    ").Append(callerId).Append("[\"").Append(requestShortName).AppendLine("\"]");
+        var previous = callerId;
+
+        void Chain(string label)
+        {
+            var id = NextId();
+            sb.Append("    ").Append(id).Append("[\"").Append(label).AppendLine("\"]");
+            sb.Append("    ").Append(previous).Append(" --> ").AppendLine(id);
+            previous = id;
+        }
+
+        foreach (var pre in preProcessorNames)
+        {
+            Chain(pre + " (pre)");
+        }
+
+        foreach (var behavior in behaviorNames)
+        {
+            Chain(behavior);
+        }
+
+        var handlerId = NextId();
+        sb.Append("    ").Append(handlerId).Append("[\"").Append(handlerShortName).AppendLine("\"]");
+        sb.Append("    ").Append(previous).Append(" --> ").AppendLine(handlerId);
+        previous = handlerId;
+
+        foreach (var post in postProcessorNames)
+        {
+            Chain(post + " (post)");
+        }
+
+        if (hasExceptionMiddleware)
+        {
+            sb.Append("    ").Append(handlerId).AppendLine(" -.exception.-> Ex[\"Exception middleware\"]");
+        }
+
+        return sb.ToString().TrimEnd('\r', '\n');
+    }
+
+    private static string BuildNotificationPipelineDiagram(
+        string notificationShortName,
+        IReadOnlyList<string> notificationBehaviorNames,
+        IReadOnlyList<string> handlerShortNames,
+        bool parallelPublish)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("graph LR");
+
+        var nodeId = 0;
+        string NextId() => "N" + nodeId++;
+
+        var publisherId = NextId();
+        sb.Append("    ").Append(publisherId).Append("[\"").Append(notificationShortName).AppendLine("\"]");
+        var previous = publisherId;
+
+        foreach (var behavior in notificationBehaviorNames)
+        {
+            var id = NextId();
+            sb.Append("    ").Append(id).Append("[\"").Append(behavior).AppendLine("\"]");
+            sb.Append("    ").Append(previous).Append(" --> ").AppendLine(id);
+            previous = id;
+        }
+
+        foreach (var handler in handlerShortNames)
+        {
+            var id = NextId();
+            sb.Append("    ").Append(id).Append("[\"").Append(handler).AppendLine("\"]");
+            sb.Append("    ").Append(previous).Append(" --> ").AppendLine(id);
+        }
+
+        sb.Append("    %% ").Append(parallelPublish ? "handlers run concurrently (Task.WhenAll)" : "handlers run sequentially, in declaration order").AppendLine();
+
+        return sb.ToString().TrimEnd('\r', '\n');
     }
 
     private static string GenerateDispatcherSource(IReadOnlyList<DispatchMethodInfo> methods, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationGroup> notificationGroups, IReadOnlyList<NotificationBehaviorInfo> notificationBehaviors, IReadOnlyList<StreamMethodInfo> streamMethods, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors, Compilation compilation)
@@ -2004,7 +2398,7 @@ namespace AutoDispatch
         sb.AppendLine("    }");
     }
 
-    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationBehaviorInfo> notificationBehaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors)
+    private static string GenerateRegistrationSource(Dictionary<string, string> registrations, IReadOnlyList<BehaviorInfo> behaviors, IReadOnlyList<NotificationBehaviorInfo> notificationBehaviors, IReadOnlyList<StreamBehaviorInfo> streamBehaviors, IReadOnlyList<ExceptionHandlerInfo> exceptionHandlers, IReadOnlyList<ExceptionActionInfo> exceptionActions, IReadOnlyList<PreProcessorInfo> preProcessors, IReadOnlyList<PostProcessorInfo> postProcessors, IReadOnlyList<ValidatorInfo> validators)
     {
         var sb = new StringBuilder();
         sb.AppendLine("// <auto-generated by AutoDispatch.Generator/>");
@@ -2077,6 +2471,15 @@ namespace AutoDispatch
         foreach (var processor in postProcessors.OrderBy(static p => p.UnboundTypeFqn, StringComparer.Ordinal))
         {
             sb.AppendLine($"            services.AddScoped(typeof({processor.UnboundTypeFqn}));");
+        }
+
+        // Every FluentValidation validator class found in the compilation is auto-registered as
+        // IValidator<TRequest> so AutoDispatchValidationPreProcessor<TCommand> (see
+        // AutoDispatch.Validation.g.cs) can resolve it with zero manual DI setup — no need to call
+        // FluentValidation's own AddValidatorsFromAssembly or register each validator by hand.
+        foreach (var validator in validators.OrderBy(static v => v.ValidatorTypeFqn, StringComparer.Ordinal))
+        {
+            sb.AppendLine($"            services.AddScoped(typeof(global::FluentValidation.IValidator<{validator.RequestTypeFqn}>), typeof({validator.ValidatorTypeFqn}));");
         }
 
         sb.AppendLine();
@@ -3525,5 +3928,20 @@ namespace AutoDispatch
         public Location Location { get; set; } = Location.None;
 
         public string? DocCommentXml { get; set; }
+    }
+
+    /// <summary>
+    /// A concrete class discovered anywhere in the compilation that implements
+    /// <c>FluentValidation.IValidator&lt;T&gt;</c> — no AutoDispatch attribute required. Used to
+    /// auto-register the validator in DI as <c>IValidator&lt;RequestTypeFqn&gt;</c> so it is picked
+    /// up automatically by the generated <c>AutoDispatchValidationPreProcessor&lt;TCommand&gt;</c>.
+    /// </summary>
+    private sealed class ValidatorInfo
+    {
+        public string ValidatorTypeFqn { get; set; } = string.Empty;
+
+        public string RequestTypeFqn { get; set; } = string.Empty;
+
+        public Location Location { get; set; } = Location.None;
     }
 }

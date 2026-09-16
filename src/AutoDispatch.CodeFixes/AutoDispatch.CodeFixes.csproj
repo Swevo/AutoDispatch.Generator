@@ -6,9 +6,19 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <IncludeBuildOutput>true</IncludeBuildOutput>
     <IsPackable>false</IsPackable>
-    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <!--
+      RS1038 is expected and accepted here: MediatRMigrationCodeFixProvider legitimately needs
+      Microsoft.CodeAnalysis.Editing's DocumentEditor (which pulls in Workspaces) to apply its fix.
+      Code fix providers only run inside an IDE/build-time workspace host, never in a bare
+      command-line compilation, so this is safe.
+    -->
+    <NoWarn>$(NoWarn);NU5128;RS1038;RS1036</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.*" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
+    <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
   </ItemGroup>
 </Project>
