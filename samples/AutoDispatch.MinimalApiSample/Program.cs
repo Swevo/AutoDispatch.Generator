@@ -26,6 +26,7 @@ public sealed record Order(Guid Id, string CustomerId);
 [CommandHandler]
 public sealed class CreateOrderHandler
 {
+    /// <summary>Creates a new order for the given customer.</summary>
     public Task<Order> HandleAsync(CreateOrderCommand command, CancellationToken ct = default)
         => Task.FromResult(new Order(Guid.NewGuid(), command.CustomerId));
 }

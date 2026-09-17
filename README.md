@@ -239,14 +239,27 @@ app.MapPost("/orders", async ([FromBody] CreateOrderCommand request, IDispatcher
 {
     var response = await dispatcher.SendAsync(request, ct);
     return Results.Ok(response);
-});
+})
+    .WithName("CreateOrder")
+    .WithTags("orders")
+    .Produces<Order>(StatusCodes.Status200OK);
 
 app.MapGet("/orders/{id}", async ([AsParameters] GetOrderQuery request, IDispatcher dispatcher, CancellationToken ct) =>
 {
     var response = await dispatcher.SendAsync(request, ct);
     return Results.Ok(response);
-});
+})
+    .WithName("GetOrder")
+    .WithTags("orders")
+    .Produces<Order>(StatusCodes.Status200OK);
 ```
+
+Every generated route is also annotated with OpenAPI metadata for free, so it shows up correctly in Swagger UI / `Microsoft.AspNetCore.OpenApi` without any extra code:
+
+- `.WithName(...)` — derived from the request type name with its `Command`/`Query` suffix stripped (e.g. `CreateOrderCommand` → `CreateOrder`)
+- `.WithSummary(...)` — forwarded from the handler's `Handle`/`HandleAsync` XML doc `<summary>`, if present (requires `<GenerateDocumentationFile>true</GenerateDocumentationFile>` — see [XML doc comments and pipeline readability](#xml-doc-comments-and-pipeline-readability))
+- `.WithTags(...)` — the route's first path segment (e.g. `/orders/{id}` → `"orders"`)
+- `.Produces<T>(...)` / `.Produces(...)` — the handler's actual result type and status code (`200 OK` with a body, or `204 No Content` for `Task`/`void` handlers)
 
 - `POST`/`PUT`/`PATCH` bind the request type from the body (`[FromBody]`); `GET`/`HEAD`/`DELETE` bind it from the route/query string (`[AsParameters]`), matching standard ASP.NET Core minimal API conventions
 - Async handlers with a result return `200 OK` with the response body; handlers with no result (`Task`/`void`) return `204 No Content`
@@ -904,7 +917,7 @@ Explicit interface implementations are not enough — the generated dispatcher c
 
 ## XML doc comments and pipeline readability
 
-Doc comments on `Handle`/`HandleAsync` methods are forwarded to the generated `IDispatcher` member automatically:
+Doc comments on `Handle`/`HandleAsync` methods are forwarded to the generated `IDispatcher` member automatically (and, if you use [minimal API endpoint generation](#minimal-api-endpoint-generation), to the generated route's `.WithSummary(...)` too). This requires `<GenerateDocumentationFile>true</GenerateDocumentationFile>` in your project — without it, the C# compiler discards doc comment trivia entirely and there is nothing for AutoDispatch to forward.
 
 ```csharp
 [Handler]

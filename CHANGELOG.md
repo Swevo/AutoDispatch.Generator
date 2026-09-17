@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.20.0] - 2026-09-16
+
+### Added
+- **OpenAPI metadata for generated minimal API endpoints** — every route generated from an `[Endpoint]`-attributed command/query (see 1.19.0) is now automatically annotated so it shows up correctly in Swagger UI / `Microsoft.AspNetCore.OpenApi` with zero extra code:
+  - `.WithName(...)` — derived from the request type name with its `Command`/`Query` suffix stripped (e.g. `CreateOrderCommand` → `CreateOrder`)
+  - `.WithSummary(...)` — forwarded from the handler's `Handle`/`HandleAsync` XML doc `<summary>`, if present
+  - `.WithTags(...)` — the route's first path segment (e.g. `/orders/{id}` → `"orders"`)
+  - `.Produces<T>(...)` / `.Produces(...)` — the handler's actual result type and status code (`200 OK` with a body, or `204 No Content` for `Task`/`void` handlers)
+- Since `.WithName`/`.WithSummary`/`.WithTags`/`.Produces` all ship in the same `Microsoft.AspNetCore.Routing` assembly as `IEndpointRouteBuilder`, no additional package reference or gating is needed beyond the existing `[Endpoint]` + ASP.NET Core routing check
+- README: "Minimal API endpoint generation" section updated with the new generated metadata; "XML doc comments" section now notes that `<GenerateDocumentationFile>true</GenerateDocumentationFile>` is required for doc comments to be forwarded at all (a compiler-level requirement, not new behavior)
+- New unit test (`HandlerWithXmlDocSummary_GeneratesWithSummary`) plus manual verification against `samples/AutoDispatch.MinimalApiSample` with a real `<summary>` doc comment; 157/157 passing solution-wide (Debug + Release)
+
 ## [1.19.0] - 2026-09-16
 
 ### Added

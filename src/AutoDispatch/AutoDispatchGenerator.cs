@@ -1080,6 +1080,42 @@ namespace AutoDispatch
     }
 
     /// <summary>
+    /// Extracts the plain-text content of a &lt;summary&gt; element from a raw doc-comment XML
+    /// fragment (as returned by <see cref="GetDocCommentXml"/>), collapsed to a single line, for
+    /// use in generated <c>.WithSummary(...)</c> calls. Returns <see langword="null"/> if there is
+    /// no doc comment, no &lt;summary&gt;, or the XML fails to parse.
+    /// </summary>
+    private static string? ExtractSummaryText(string? docCommentXml)
+    {
+        if (string.IsNullOrWhiteSpace(docCommentXml))
+        {
+            return null;
+        }
+
+        System.Xml.Linq.XElement member;
+        try
+        {
+            member = System.Xml.Linq.XElement.Parse(docCommentXml);
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+
+        var summary = member.Element("summary");
+        if (summary is null)
+        {
+            return null;
+        }
+
+        var text = string.Join(" ", summary.Value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Trim())
+            .Where(static line => line.Length > 0));
+
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
+
+    /// <summary>
     /// Converts a symbol's raw `GetDocumentationCommentXml()` output (a single
     /// &lt;member&gt;...&lt;/member&gt; fragment) into indented `///` doc-comment lines
     /// suitable for emission above a generated member.
@@ -1572,31 +1608,73 @@ namespace AutoDispatch
             sb.AppendLine("                global::System.Threading.CancellationToken ct) =>");
             sb.AppendLine("            {");
 
+            string? successResponseTypeFqn;
             if (method.IsAsync)
             {
                 if (method.AsyncResultTypeFqn != null)
                 {
                     sb.AppendLine("                var response = await dispatcher.SendAsync(request, ct).ConfigureAwait(false);");
                     sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.Ok(response);");
+                    successResponseTypeFqn = method.AsyncResultTypeFqn;
                 }
                 else
                 {
                     sb.AppendLine("                await dispatcher.SendAsync(request, ct).ConfigureAwait(false);");
                     sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.NoContent();");
+                    successResponseTypeFqn = null;
                 }
             }
             else if (method.ReturnTypeFqn == "void")
             {
                 sb.AppendLine("                dispatcher.Send(request);");
                 sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.NoContent();");
+                successResponseTypeFqn = null;
             }
             else
             {
                 sb.AppendLine("                var response = dispatcher.Send(request);");
                 sb.AppendLine("                return global::Microsoft.AspNetCore.Http.Results.Ok(response);");
+                successResponseTypeFqn = method.ReturnTypeFqn;
             }
 
-            sb.AppendLine("            });");
+            sb.AppendLine("            })");
+
+            var chainLines = new List<string>();
+
+            var operationName = GetShortTypeName(endpoint.RequestTypeFqn);
+            if (operationName.EndsWith("Command", StringComparison.Ordinal))
+            {
+                operationName = operationName.Substring(0, operationName.Length - "Command".Length);
+            }
+            else if (operationName.EndsWith("Query", StringComparison.Ordinal))
+            {
+                operationName = operationName.Substring(0, operationName.Length - "Query".Length);
+            }
+
+            chainLines.Add($".WithName(\"{operationName}\")");
+
+            var summary = ExtractSummaryText(method.DocCommentXml);
+            if (summary != null)
+            {
+                chainLines.Add($".WithSummary(\"{summary.Replace("\"", "\\\"")}\")");
+            }
+
+            var firstSegment = endpoint.Route.TrimStart('/').Split('/')[0];
+            if (firstSegment.Length > 0 && !firstSegment.StartsWith("{", StringComparison.Ordinal))
+            {
+                chainLines.Add($".WithTags(\"{firstSegment}\")");
+            }
+
+            chainLines.Add(successResponseTypeFqn != null
+                ? $".Produces<{successResponseTypeFqn}>(global::Microsoft.AspNetCore.Http.StatusCodes.Status200OK)"
+                : ".Produces(global::Microsoft.AspNetCore.Http.StatusCodes.Status204NoContent)");
+
+            for (var i = 0; i < chainLines.Count; i++)
+            {
+                sb.Append("                ").Append(chainLines[i]);
+                sb.AppendLine(i == chainLines.Count - 1 ? ";" : string.Empty);
+            }
+
             sb.AppendLine();
         }
 

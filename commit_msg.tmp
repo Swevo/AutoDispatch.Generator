@@ -1,0 +1,19 @@
+v1.20.0: OpenAPI metadata for generated minimal API endpoints
+
+Every route generated from an [Endpoint]-attributed command/query now gets
+.WithName(...), .WithSummary(...) (forwarded from XML doc <summary>),
+.WithTags(...), and .Produces<T>(...)/.Produces(...) automatically, so it
+shows up correctly in Swagger UI / Microsoft.AspNetCore.OpenApi with zero
+extra code.
+
+- .WithName: derived from the request type name (Command/Query suffix stripped)
+- .WithSummary: forwarded from the handler's Handle/HandleAsync XML doc summary
+- .WithTags: the route's first path segment
+- .Produces<T>/.Produces: real response type and status code (200/204)
+
+Updated samples/AutoDispatch.MinimalApiSample with a doc-commented handler and
+GenerateDocumentationFile=true to demonstrate the full pipeline end-to-end.
+Updated README (Minimal API + XML doc comments sections) and CHANGELOG.
+157/157 tests passing (Debug + Release).
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>

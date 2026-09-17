@@ -176,4 +176,22 @@ public sealed class DeleteOrderHandler
         Assert.Contains("dispatcher.Send(request);", src);
         Assert.Contains("global::Microsoft.AspNetCore.Http.Results.NoContent()", src);
     }
+
+    [Fact]
+    public void HandlerWithXmlDocSummary_GeneratesWithSummary()
+    {
+        var sources = DispatchGeneratorTests.RunGenerator(Usings + AspNetCoreRoutingStub + @"
+[Endpoint(""POST"", ""/orders"")]
+public sealed class CreateOrderCommand { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    /// <summary>Creates a new order.</summary>
+    public Task<int> HandleAsync(CreateOrderCommand cmd, CancellationToken ct) => Task.FromResult(42);
+}", out _);
+
+        var src = sources["AutoDispatch.Endpoints.g.cs"];
+        Assert.Contains(".WithSummary(\"Creates a new order.\")", src);
+    }
 }
