@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.21.0] - 2026-09-17
+
+### Added
+- **Result pattern with automatic exception capture** — a built-in `Result`/`Result<T>` type (with `Error`, `IsSuccess`/`IsFailure`, `Value`, `Fail(...)`, and an implicit `T -> Result<T>` conversion) generated into every consuming project, matching patterns like FluentResults/ErrorOr but with zero package reference required
+- Return `Task<Result>`/`Task<Result<T>>` from a `Handle`/`HandleAsync` method to opt in: AutoDispatch automatically wraps the dispatch method in a `try`/`catch` and converts *any* unhandled exception — from the handler, any `[Behavior]`/`[PreProcessor]`/`[PostProcessor]`, or even the automatic FluentValidation pre-processor's `ValidationException` — into `Result.Fail(ex.Message)`/`Result<T>.Fail(ex.Message)` instead of letting it propagate; no manual `try`/`catch` required at the call site
+- A more specific `[ExceptionHandler]` for a given exception type still takes priority — the automatic catch-all is always the least-derived, last catch clause, so a handler that returns `Handled(...)` short-circuits before the automatic Result conversion runs
+- Entirely opt-in per handler based on its declared return type; handlers that don't return `Result`/`Result<T>` see zero codegen change
+- README: new "Result pattern" section with usage and conventions
+- 3 new runtime tests covering exception-to-failure conversion, the success path, and that a registered `[ExceptionHandler]` still wins over the automatic conversion; 160/160 passing solution-wide (Debug + Release)
+
 ## [1.20.0] - 2026-09-16
 
 ### Added

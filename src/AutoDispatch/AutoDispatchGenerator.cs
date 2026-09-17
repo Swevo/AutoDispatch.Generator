@@ -60,6 +60,119 @@ namespace AutoDispatch
 
     public readonly struct Unit { public static readonly Unit Value = default; }
 
+    /// <summary>A single failure reason for a <see cref=""Result""/> or <see cref=""Result{T}""/>.</summary>
+    public readonly struct Error
+    {
+        public Error(string message, string? code = null)
+        {
+            Message = message;
+            Code = code;
+        }
+
+        /// <summary>A human-readable description of the failure.</summary>
+        public string Message { get; }
+
+        /// <summary>An optional machine-readable failure code (e.g. for client-side branching).</summary>
+        public string? Code { get; }
+
+        public override string ToString() => Code is null ? Message : $""{Code}: {Message}"";
+    }
+
+    /// <summary>
+    /// A first-class success/failure outcome for a command/query with no return value, as an
+    /// alternative to throwing exceptions for expected/business failures. Return
+    /// <c>Task&lt;Result&gt;</c> from a handler to opt in: AutoDispatch automatically catches any
+    /// exception that escapes the handler (or any pipeline behavior/pre-processor around it,
+    /// including AutoDispatch's own automatic FluentValidation pre-processor) and converts it into
+    /// <see cref=""Fail(string, string?)""/> instead of letting it propagate, so callers only ever
+    /// need to check <see cref=""IsSuccess""/> -- no try/catch required at the call site. There is
+    /// no equivalent to this in MediatR.
+    /// </summary>
+    public readonly struct Result
+    {
+        private Result(bool isSuccess, System.Collections.Generic.IReadOnlyList<Error> errors)
+        {
+            IsSuccess = isSuccess;
+            Errors = errors;
+        }
+
+        /// <summary>Whether the operation succeeded.</summary>
+        public bool IsSuccess { get; }
+
+        /// <summary>Whether the operation failed.</summary>
+        public bool IsFailure => !IsSuccess;
+
+        /// <summary>The failure reasons. Empty when <see cref=""IsSuccess""/> is <c>true</c>.</summary>
+        public System.Collections.Generic.IReadOnlyList<Error> Errors { get; }
+
+        /// <summary>The first failure reason, if any.</summary>
+        public Error? FirstError => Errors.Count > 0 ? Errors[0] : (Error?)null;
+
+        /// <summary>A successful result.</summary>
+        public static readonly Result Success = new(true, System.Array.Empty<Error>());
+
+        /// <summary>A failed result with a single error.</summary>
+        public static Result Fail(string message, string? code = null) => new(false, new[] { new Error(message, code) });
+
+        /// <summary>A failed result with a single error.</summary>
+        public static Result Fail(Error error) => new(false, new[] { error });
+
+        /// <summary>A failed result with one or more errors.</summary>
+        public static Result Fail(System.Collections.Generic.IEnumerable<Error> errors) => new(false, System.Linq.Enumerable.ToArray(errors));
+    }
+
+    /// <summary>
+    /// A first-class success/failure outcome carrying a <typeparamref name=""T""/> value on
+    /// success, as an alternative to throwing exceptions for expected/business failures. Return
+    /// <c>Task&lt;Result&lt;T&gt;&gt;</c> from a handler to opt in: AutoDispatch automatically
+    /// catches any exception that escapes the handler (or any pipeline behavior/pre-processor
+    /// around it, including AutoDispatch's own automatic FluentValidation pre-processor) and
+    /// converts it into <see cref=""Fail(string, string?)""/> instead of letting it propagate, so
+    /// callers only ever need to check <see cref=""IsSuccess""/> -- no try/catch required at the
+    /// call site. There is no equivalent to this in MediatR.
+    /// </summary>
+    public readonly struct Result<T>
+    {
+        private Result(bool isSuccess, T? value, System.Collections.Generic.IReadOnlyList<Error> errors)
+        {
+            IsSuccess = isSuccess;
+            _value = value;
+            Errors = errors;
+        }
+
+        private readonly T? _value;
+
+        /// <summary>Whether the operation succeeded.</summary>
+        public bool IsSuccess { get; }
+
+        /// <summary>Whether the operation failed.</summary>
+        public bool IsFailure => !IsSuccess;
+
+        /// <summary>The failure reasons. Empty when <see cref=""IsSuccess""/> is <c>true</c>.</summary>
+        public System.Collections.Generic.IReadOnlyList<Error> Errors { get; }
+
+        /// <summary>The first failure reason, if any.</summary>
+        public Error? FirstError => Errors.Count > 0 ? Errors[0] : (Error?)null;
+
+        /// <summary>The success value. Throws <see cref=""System.InvalidOperationException""/> if <see cref=""IsFailure""/> is <c>true</c> -- check <see cref=""IsSuccess""/> first.</summary>
+        public T Value => IsSuccess ? _value! : throw new System.InvalidOperationException(""Cannot access Value on a failed Result<T>. Check IsSuccess first."");
+
+        /// <summary>A successful result carrying <paramref name=""value""/>.</summary>
+        public static Result<T> Success(T value) => new(true, value, System.Array.Empty<Error>());
+
+        /// <summary>A failed result with a single error.</summary>
+        public static Result<T> Fail(string message, string? code = null) => new(false, default, new[] { new Error(message, code) });
+
+        /// <summary>A failed result with a single error.</summary>
+        public static Result<T> Fail(Error error) => new(false, default, new[] { error });
+
+        /// <summary>A failed result with one or more errors.</summary>
+        public static Result<T> Fail(System.Collections.Generic.IEnumerable<Error> errors) => new(false, default, System.Linq.Enumerable.ToArray(errors));
+
+        /// <summary>Implicitly wraps a value as a successful result.</summary>
+        public static implicit operator Result<T>(T value) => Success(value);
+    }
+
     [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
     public sealed class BehaviorAttribute : Attribute
     {
@@ -2149,7 +2262,13 @@ namespace AutoDispatch
                 .ToArray();
             var hasPostProcessors = sortedPostProcessors.Length > 0;
 
-            if (!method.IsAsync || (!hasBehaviors && !hasExceptionHandlers && !hasPreProcessors && !hasPostProcessors))
+            // Result/Result<T>-returning async handlers automatically get unhandled exceptions
+            // (from the handler itself, any behavior/pre/post-processor, or the automatic
+            // FluentValidation pre-processor's ValidationException) converted into Result.Fail(...)
+            // instead of propagating -- no MediatR equivalent for this.
+            var isResultCapture = method.IsAsync && method.AsyncResultTypeFqn != null && IsResultReturnType(method.AsyncResultTypeFqn);
+
+            if (!method.IsAsync || (!hasBehaviors && !hasExceptionHandlers && !hasPreProcessors && !hasPostProcessors && !isResultCapture))
             {
                 // Simple expression-body form (sync, or async with no behaviors/exception handlers/processors)
                 AppendDocComment(sb, method.DocCommentXml, "        ");
@@ -2205,8 +2324,13 @@ namespace AutoDispatch
                     sb.AppendLine($"        // Exception middleware (most-derived first): {exceptionOrder}");
                 }
 
+                if (isResultCapture)
+                {
+                    sb.AppendLine("        // Result capture: unhandled exceptions become a failed Result instead of propagating");
+                }
+
                 sb.Append("        public ");
-                if (hasExceptionHandlers)
+                if (hasExceptionHandlers || isResultCapture)
                 {
                     sb.Append("async ");
                 }
@@ -2272,7 +2396,7 @@ namespace AutoDispatch
                     sb.AppendLine($"            pipeline = () => _b{i}.HandleAsync(command, _p{i}, ct);");
                 }
 
-                if (!hasExceptionHandlers)
+                if (!hasExceptionHandlers && !isResultCapture)
                 {
                     sb.AppendLine("            return pipeline();");
                 }
@@ -2304,6 +2428,14 @@ namespace AutoDispatch
                         }
 
                         sb.AppendLine("                throw;");
+                        sb.AppendLine("            }");
+                    }
+
+                    if (isResultCapture && !exceptionMiddlewareGroups.Any(static g => g.ExceptionTypeFqn == "global::System.Exception"))
+                    {
+                        sb.AppendLine("            catch (global::System.Exception ex)");
+                        sb.AppendLine("            {");
+                        sb.AppendLine($"                return {GetResultFailExpression(resultFqn)};");
                         sb.AppendLine("            }");
                     }
                 }
@@ -3032,6 +3164,21 @@ namespace AutoDispatch
         var lastDot = name.LastIndexOf('.');
         return lastDot >= 0 ? name.Substring(lastDot + 1) : name;
     }
+
+    /// <summary>
+    /// Whether an async dispatch method's result type is <c>AutoDispatch.Result</c> or
+    /// <c>AutoDispatch.Result&lt;T&gt;</c> — the trigger for automatic exception-to-Result capture
+    /// (see the async dispatch method generation in <see cref="GenerateDispatcherSource"/>).
+    /// </summary>
+    private static bool IsResultReturnType(string resultTypeFqn) =>
+        resultTypeFqn == "global::AutoDispatch.Result" ||
+        resultTypeFqn.StartsWith("global::AutoDispatch.Result<", StringComparison.Ordinal);
+
+    /// <summary>Builds the <c>Result.Fail(...)</c>/<c>Result&lt;T&gt;.Fail(...)</c> expression used to convert a caught exception into a failed Result.</summary>
+    private static string GetResultFailExpression(string resultTypeFqn) =>
+        resultTypeFqn == "global::AutoDispatch.Result"
+            ? "global::AutoDispatch.Result.Fail(ex.Message)"
+            : $"{resultTypeFqn}.Fail(ex.Message)";
 
     private static string GetInterfaceReturnType(DispatchMethodInfo method) =>
         method.ReturnTypeFqn;

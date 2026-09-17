@@ -24,7 +24,8 @@ AutoDispatch gives you the **MediatR-style handler pattern** without `IRequest<T
 - **Automatic MediatR migration hints** — if MediatR is still referenced, AutoDispatch reports an `AD100`/`AD101` suggestion with a one-click fix that converts a handler to `[Handler]`/`[NotificationHandler]` for you
 - **Automatic FluentValidation integration** — reference FluentValidation and validators are auto-registered and auto-invoked before every async handler runs, no attribute or manual DI wiring needed
 - **Pipeline visualization** — every generated pipeline is also rendered as a Mermaid flowchart, available at compile time via `AutoDispatchPipelineDiagrams`, for pasting into docs/ADRs
-- **Minimal API endpoint generation** — `[Endpoint("POST", "/orders")]` on a command/query type generates a `MapAutoDispatchEndpoints()` extension method that wires it directly to an ASP.NET Core minimal API route, no hand-written lambda needed
+- **Minimal API endpoint generation** — `[Endpoint("POST", "/orders")]` on a command/query type generates a `MapAutoDispatchEndpoints()` extension method that wires it directly to an ASP.NET Core minimal API route, no hand-written lambda needed, complete with generated OpenAPI metadata (`.WithName`/`.WithSummary`/`.WithTags`/`.Produces<T>`)
+- **Result pattern with automatic exception capture** — return `Task<Result>`/`Task<Result<T>>` from a handler and any unhandled exception (including FluentValidation's) is automatically converted into a failed `Result`, no manual `try`/`catch` required — something MediatR has no equivalent for at all
 - **No marker interfaces** — commands stay as plain POCOs
 - **AOT-friendly** — everything is compile-time generated; see the [Native AOT sample](samples/AutoDispatch.AotSample) for a project that publishes with `PublishAot=true` and zero trim/AOT analyzer warnings
 - **DI-ready** — `AddAutoDispatch()` wires up handlers, behaviors, and `IDispatcher`
@@ -773,6 +774,73 @@ That's it — no `[PreProcessor]`, no `services.AddScoped<IValidator<...>, ...>(
   returning `Task`/`Task<T>`); synchronous handlers are unaffected.
 - Without a FluentValidation reference, nothing changes — no extra generated code, no extra DI
   registrations, exactly the same output as before this feature existed.
+
+## Result pattern
+
+Return `Task<Result>` or `Task<Result<T>>` from a handler to represent expected/business failures
+as data instead of exceptions — a pattern MediatR has no built-in support for at all:
+
+```csharp
+using AutoDispatch;
+
+public sealed record CreateOrderCommand(string CustomerId);
+public sealed record Order(Guid Id, string CustomerId);
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<Result<Order>> HandleAsync(CreateOrderCommand command, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(command.CustomerId))
+        {
+            return Task.FromResult(Result<Order>.Fail("CustomerId is required.", code: "invalid_customer"));
+        }
+
+        return Task.FromResult(Result<Order>.Success(new Order(Guid.NewGuid(), command.CustomerId)));
+    }
+}
+```
+
+```csharp
+var result = await dispatcher.SendAsync(new CreateOrderCommand(customerId));
+if (result.IsSuccess)
+{
+    return Results.Ok(result.Value);
+}
+
+return Results.BadRequest(result.Errors.Select(e => e.Message));
+```
+
+The real payoff, though, is **automatic exception-to-Result conversion**: whenever a dispatch
+method's result type is `Result`/`Result<T>`, AutoDispatch wraps it in a `try`/`catch` and converts
+*any* unhandled exception — thrown by the handler itself, a `[Behavior]`, a `[PreProcessor]`, or
+even the automatic FluentValidation pre-processor's `ValidationException` — into `Result.Fail(...)`
+/`Result<T>.Fail(...)` automatically. You never need a manual `try`/`catch` at the call site, and a
+FluentValidation `NotEmpty()`/`GreaterThan(0)` failure surfaces as an ordinary failed `Result` with
+zero extra code:
+
+```csharp
+[Handler]
+public sealed class CreateOrderHandler
+{
+    // A FluentValidation validator for CreateOrderCommand can throw ValidationException here
+    // (via the automatic pre-processor) -- it becomes Result<Order>.Fail(ex.Message), not an
+    // unhandled exception.
+    public Task<Result<Order>> HandleAsync(CreateOrderCommand command, CancellationToken ct = default)
+        => Task.FromResult(Result<Order>.Success(new Order(Guid.NewGuid(), command.CustomerId)));
+}
+```
+
+Conventions:
+- `[ExceptionHandler]`s for specific exception types still run first and take priority — the
+  automatic `catch (Exception)` that produces a failed `Result` is always the innermost/last catch
+  clause, so a more specific handler that returns `Handled(...)` short-circuits before the
+  automatic conversion ever runs.
+- `Result<T>` has an implicit conversion from `T`, so a handler can `return value;` directly in
+  contexts that support it.
+- This only applies to **async** handlers, matching every other pipeline feature.
+- Handlers that don't return `Result`/`Result<T>` are completely unaffected — this is entirely
+  opt-in per handler, based purely on its declared return type.
 
 ## Pipeline visualization (Mermaid diagrams)
 

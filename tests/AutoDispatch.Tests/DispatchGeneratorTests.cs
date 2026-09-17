@@ -2335,6 +2335,104 @@ public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHa
     }
 
     [Fact]
+    public async Task ResultCapture_Runtime_ExceptionBecomesFailedResult()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId
+{
+    public string Value { get; }
+    public OrderId(string value) => Value = value;
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<Result<OrderId>> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+        => throw new System.InvalidOperationException(""boom"");
+}";
+
+        using var compiled = CompileAssembly(source);
+        var result = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+
+        var resultType = result!.GetType();
+        Assert.False((bool)resultType.GetProperty("IsSuccess")!.GetValue(result)!);
+        var errors = (System.Collections.IEnumerable)resultType.GetProperty("Errors")!.GetValue(result)!;
+        var firstError = errors.Cast<object>().Single();
+        var message = (string)firstError.GetType().GetProperty("Message")!.GetValue(firstError)!;
+        Assert.Equal("boom", message);
+    }
+
+    [Fact]
+    public async Task ResultCapture_Runtime_SuccessfulHandlerReturnsSuccess()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId
+{
+    public string Value { get; }
+    public OrderId(string value) => Value = value;
+}
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<Result<OrderId>> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+        => Task.FromResult(Result<OrderId>.Success(new OrderId(""ok"")));
+}";
+
+        using var compiled = CompileAssembly(source);
+        var result = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+
+        var resultType = result!.GetType();
+        Assert.True((bool)resultType.GetProperty("IsSuccess")!.GetValue(result)!);
+        var value = resultType.GetProperty("Value")!.GetValue(result)!;
+        Assert.Equal("ok", value.GetType().GetProperty("Value")!.GetValue(value));
+    }
+
+    [Fact]
+    public async Task ResultCapture_Runtime_SpecificExceptionHandlerStillWinsOverResultCapture()
+    {
+        const string source = @"
+using AutoDispatch;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class CreateOrderCommand { }
+public sealed class OrderId { }
+
+[Handler]
+public sealed class CreateOrderHandler
+{
+    public Task<Result<OrderId>> HandleAsync(CreateOrderCommand cmd, CancellationToken ct = default)
+        => throw new ValidationException();
+}
+
+public sealed class ValidationException : System.Exception { }
+
+[ExceptionHandler]
+public sealed class ValidationExceptionHandler<TCommand, TResult> : IExceptionHandler<TCommand, TResult, ValidationException>
+{
+    public Task<ExceptionHandlerResult<TResult>> HandleAsync(TCommand command, ValidationException exception, CancellationToken ct = default)
+        => Task.FromResult(ExceptionHandlerResult<TResult>.Handled((TResult)(object)Result<OrderId>.Success(new OrderId())));
+}";
+
+        using var compiled = CompileAssembly(source);
+        var result = await InvokeSendAsync(compiled.Assembly, "CreateOrderCommand");
+
+        var resultType = result!.GetType();
+        Assert.True((bool)resultType.GetProperty("IsSuccess")!.GetValue(result)!);
+    }
+
+    [Fact]
     public void Diagnostic_AD015_ExceptionHandlerMustBeOpenGeneric()
     {
         RunGenerator(@"
